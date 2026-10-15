@@ -57,7 +57,6 @@ def cmd_crawl(args):
         delay_seconds=args.delay,
         timeout_seconds=args.timeout,
     )
-    print(f"[*] Bắt đầu thu thập mạng từ Chương {args.start_chap} đến Chương {args.end_chap}")
     res = crawler.crawl_range(
         story_url=args.story_url,
         start_chapter_url=args.start_url,
@@ -66,7 +65,13 @@ def cmd_crawl(args):
         on_log=lambda lvl, msg: print(f"[{lvl}] {msg}"),
         on_progress=lambda curr, tot, msg: print(f"Tiến độ: {curr}/{tot} - {msg}"),
     )
-    print(f"[✓] Hoàn thành: Đã xử lý {res['fetched_count']} chương.")
+    if res.get("success"):
+        print(f"[✓] {res.get('status_message')}")
+    else:
+        print(f"[!] {res.get('status_message')}")
+        if res.get("stop_reason"):
+            print(f"[!] Nguyên nhân chi tiết: {res.get('stop_reason')}")
+        sys.exit(1)
 
 
 def cmd_merge(args):
@@ -184,13 +189,18 @@ def cmd_process(args):
     elif args.start_url:
         crawler = NetworkCrawler(storage=storage)
         print(f"[*] Đang tải trực tiếp từ web: {args.start_url}")
-        crawler.crawl_range(
+        res = crawler.crawl_range(
             story_url=args.story_url or "https://vivutruyen.com/truyen/pham-nhan-tu-tien",
             start_chapter_url=args.start_url,
             start_chap_num=args.start_chap,
             end_chap_num=args.end_chap,
             on_log=lambda lvl, msg: print(f"[{lvl}] {msg}"),
         )
+        if not res.get("success"):
+            print(f"[!] Cảnh báo thu thập: {res.get('status_message')}")
+            if res.get("fetched_count", 0) == 0:
+                print("[X] Không có chương nào được tải thành công. Hủy bỏ bước gộp tập.")
+                return
 
     # 2. Gộp tập & xuất kết quả
     cmd_merge(args)
@@ -213,7 +223,7 @@ def main():
     p_crawl.add_argument("--story-url", default="https://vivutruyen.com/truyen/pham-nhan-tu-tien", help="URL trang truyện")
     p_crawl.add_argument("--start-url", required=True, help="URL chương bắt đầu")
     p_crawl.add_argument("--start-chap", type=int, default=1, help="Số chương bắt đầu")
-    p_crawl.add_argument("--end-chap", type=int, default=4, help="Số chương kết thúc")
+    p_crawl.add_argument("--end-chap", type=int, default=12, help="Số chương kết thúc (khoảng tải: start-chap đến end-chap)")
     p_crawl.add_argument("--delay", type=float, default=1.5, help="Thời gian nghỉ giữa các yêu cầu (giây)")
     p_crawl.add_argument("--timeout", type=int, default=20, help="Thời gian chờ tối đa (giây)")
 
@@ -224,7 +234,7 @@ def main():
     p_merge.add_argument("--start-chap", type=int, required=True, help="Chương bắt đầu")
     p_merge.add_argument("--end-chap", type=int, required=True, help="Chương kết thúc")
     p_merge.add_argument("--start-vol", type=int, required=True, help="Số tập bắt đầu (do người dùng chỉ định)")
-    p_merge.add_argument("--per-vol", type=int, default=4, help="Số chương mỗi tập (mặc định: 4)")
+    p_merge.add_argument("--per-vol", type=int, default=4, help="Số chương mỗi tập (mặc định: 4, chỉ dùng cho bước gộp tập)")
     p_merge.add_argument("--out-dir", default="output_volumes", help="Thư mục xuất file")
     p_merge.add_argument("--overwrite", action="store_true", help="Ghi đè file nếu đã tồn tại")
     p_merge.add_argument("--allow-partial", action="store_true", help="Cho phép xuất nhóm cuối dưới 4 chương")
@@ -239,10 +249,10 @@ def main():
     p_proc.add_argument("--story-url", help="URL truyện")
     p_proc.add_argument("--start-url", help="URL chương bắt đầu (nếu tải mạng)")
     p_proc.add_argument("--title", default="Phàm Nhân Tu Tiên", help="Tên truyện")
-    p_proc.add_argument("--start-chap", type=int, required=True, help="Chương bắt đầu")
-    p_proc.add_argument("--end-chap", type=int, required=True, help="Chương kết thúc")
+    p_proc.add_argument("--start-chap", type=int, required=True, help="Khoảng tải: Chương bắt đầu")
+    p_proc.add_argument("--end-chap", type=int, required=True, help="Khoảng tải: Chương kết thúc")
     p_proc.add_argument("--start-vol", type=int, required=True, help="Số tập bắt đầu")
-    p_proc.add_argument("--per-vol", type=int, default=4, help="Số chương mỗi tập")
+    p_proc.add_argument("--per-vol", type=int, default=4, help="Số chương mỗi tập (chỉ phục vụ gộp tập, không giới hạn tải)")
     p_proc.add_argument("--out-dir", default="output_volumes", help="Thư mục xuất file")
     p_proc.add_argument("--overwrite", action="store_true", help="Ghi đè file nếu đã tồn tại")
     p_proc.add_argument("--allow-partial", action="store_true", help="Cho phép xuất nhóm cuối dưới 4 chương")

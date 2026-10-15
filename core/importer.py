@@ -66,8 +66,13 @@ class OfflineImporter:
                 with open(filepath, "r", encoding="utf-8", errors="replace") as f:
                     content = f.read()
 
+                web_base = story_url if story_url.startswith("http") else "https://vivutruyen.com"
                 if ext in (".html", ".htm"):
-                    parsed = SourceParser.parse_chapter_html(content, current_url=f"file://{filepath}")
+                    parsed = SourceParser.parse_chapter_html(
+                        content,
+                        current_url=f"file://{filepath}",
+                        base_url=web_base
+                    )
                 else:
                     parsed = SourceParser.parse_raw_text_file(content, default_filename=filename)
 
@@ -78,6 +83,9 @@ class OfflineImporter:
                     if m:
                         chap_num = int(m.group(1))
 
+                prev_url = SourceParser._resolve_url(parsed.get("prev_url", ""), base_url=web_base)
+                next_url = SourceParser._resolve_url(parsed.get("next_url", ""), base_url=web_base)
+
                 chapter = Chapter(
                     story_id=story.id,
                     chapter_num=chap_num,
@@ -86,8 +94,8 @@ class OfflineImporter:
                     raw_content=parsed["raw_content"],
                     content_hash=parsed["content_hash"],
                     status="verified",
-                    prev_url=parsed.get("prev_url", ""),
-                    next_url=parsed.get("next_url", ""),
+                    prev_url=prev_url,
+                    next_url=next_url,
                     warnings=parsed.get("warnings", []),
                 )
 

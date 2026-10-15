@@ -153,3 +153,33 @@ Mỗi tập được xuất thành 4 tệp đồng bộ:
 - **Ghi đè:** Không ghi đè tệp xuất nếu chưa bật cờ overwrite. Quá trình xuất sử dụng file tạm `.tmp` trước khi atomic replace.
 - **Tập nháp (DRAFT):** Nếu thiếu một chương hoặc có lỗi tải, tập được đánh dấu là `is_draft = True`, xuất file có hậu tố `_DRAFT_...` kèm cảnh báo danh sách chương thiếu, không xuất như tập hoàn chỉnh.
 - **Nhóm cuối:** Nhóm cuối dưới 4 chương chỉ xuất khi bật cờ `allow_partial_last_volume`.
+
+---
+
+## 6. CHẨN ĐOÁN CRAWLER & TÁCH BIỆT THAM SỐ TẢI / GỘP
+
+### A. Tách biệt hai tham số:
+1. **Khoảng tải (`start_chap` → `end_chap`):**
+   - Xác định chính xác phạm vi chương cần thu thập từ nguồn (ví dụ: Chương 1 đến 12).
+   - Crawler sẽ tuần tự tải đủ tất cả các chương trong khoảng này theo liên kết chương tiếp (`nextChap`), không dừng lại sau khi đủ một tập.
+2. **Số chương mỗi tập (`chapters_per_volume`, mặc định: 4):**
+   - Chỉ phục vụ bước gộp file TXT sau khi đã có dữ liệu. Ví dụ tải 1–12 sẽ gộp thành 3 tập hoàn chỉnh (Tập 1: 1–4, Tập 2: 5–8, Tập 3: 9–12).
+
+### B. Cơ chế trích xuất liên kết và khôi phục tiến độ (Resume):
+- **Trích xuất liên kết chương kế tiếp:** Ưu tiên biến JavaScript `nextChap`. Nếu không có, quét các thẻ điều hướng HTML kiểm tra `rel="next"`, văn bản "chương tiếp", và xử lý triệt để bẫy của website khi cả thẻ "Chương trước" lẫn "Chương tiếp" đều mang `class='next'`.
+- **Khôi phục tiến độ an toàn:** Khi khôi phục các chương đã có sẵn trong CSDL (từ offline import hoặc lần chạy trước), liên kết `next_url` được tự động chuẩn hóa về URL trực tuyến (loại bỏ tiền tố `file://` cục bộ), phát hiện vòng lặp URL trước khi resume để tránh lặp vô tận.
+
+### C. Ghi log chẩn đoán cho từng chương (Diagnostic Logs):
+Mỗi chương được ghi vết chi tiết:
+- Số chương dự kiến và số chương đọc được.
+- URL yêu cầu và URL sau chuyển hướng.
+- Mã phản hồi HTTP, Content-Type và kích thước (bytes).
+- Số đoạn và số ký tự nội dung trích xuất.
+- URL chương tiếp theo và nguồn lấy liên kết (`script_var:nextChap`, `html_nav:text`, ...).
+- Lý do dừng chính xác khi gặp lỗi hoặc dừng sớm.
+- **Cam kết bảo mật:** Tuyệt đối không ghi cookie, session token hay API key vào log.
+
+### D. Trạng thái hiển thị khi chưa hoàn tất:
+Nếu quá trình tải bị dừng sớm (ví dụ gặp HTTP 403/429, bị chuyển hướng về trang chủ hoặc thiếu liên kết tiếp theo):
+- Hệ thống hiển thị rõ ràng: `Chưa hoàn tất: X/Y chương` kèm nguyên nhân cụ thể.
+- Tuyệt đối không thông báo hoàn tất toàn bộ khi chưa tải đủ số chương yêu cầu.

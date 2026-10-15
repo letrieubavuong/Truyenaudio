@@ -30,9 +30,28 @@ class SourceParser:
                 res[key] = match.group(1).strip()
         return res
 
+    @staticmethod
+    def _resolve_url(cand: str, current_url: str = "", base_url: str = "https://vivutruyen.com") -> str:
+        """Chuẩn hóa và phân giải URL liên kết chương tuyệt đối hoặc tương đối."""
+        if not cand:
+            return ""
+        cand = cand.strip()
+        if cand.startswith("http://") or cand.startswith("https://"):
+            return cand
+        # Xử lý trường hợp cand dính tiền tố file:// nhưng chứa path web như /truyen/...
+        if cand.startswith("file://"):
+            m = re.search(r"(/truyen/.+)", cand)
+            if m:
+                cand = m.group(1)
+            else:
+                return cand
+        # Xác định URL gốc tham chiếu
+        ref_url = current_url if (current_url and (current_url.startswith("http://") or current_url.startswith("https://"))) else (base_url or "https://vivutruyen.com")
+        return urljoin(ref_url, cand)
+
     @classmethod
     def parse_chapter_html(
-        cls, html_text: str, current_url: str = ""
+        cls, html_text: str, current_url: str = "", base_url: str = "https://vivutruyen.com"
     ) -> Dict[str, Any]:
         """
         Phân tích mã nguồn HTML chương truyện thực tế của vivutruyen.com.
@@ -159,33 +178,97 @@ class SourceParser:
         # 6. Điều hướng Chương trước / Chương sau
         prev_url = ""
         next_url = ""
+        next_source = "none"
+        prev_source = "none"
 
-        # Ưu tiên từ script_vars
-        if "prevChap" in script_vars:
-            prev_cand = script_vars["prevChap"]
-            # Không tính link về trang chủ truyện như /truyen/pham-nhan-tu-tien/ là chương trước của chương 1
-            if prev_cand and not prev_cand.rstrip("/").endswith(script_vars.get("bid", "xxx")):
-                prev_url = urljoin(current_url, prev_cand)
+        bid = script_vars.get("bid", "pham-nhan-tu-tien")
 
+        # 6.1. Ưu tiên 1: Biến JavaScript trong mã nguồn
         if "nextChap" in script_vars:
-            next_cand = script_vars["nextChap"]
-            if next_cand:
-                next_url = urljoin(current_url, next_cand)
+            next_cand = script_vars["nextChap"].strip()
+            # Bỏ qua nếu là chuỗi rỗng, hash hoặc javascript
+            if next_cand and next_cand != "#" and not next_cand.startswith("javascript:"):
+                # Bỏ qua nếu trỏ về đúng trang mục lục truyện
+                if not next_cand.rstrip("/").endswith(bid):
+                    next_url = cls._resolve_url(next_cand, current_url, base_url)
+                    next_source = "script_var:nextChap"
 
-        # Fallback từ HTML thẻ <a> điều hướng nếu script không có
-        if not next_url:
-            next_tag = soup.select_one(".chapter_control a.next, #gotochap a.next")
-            if next_tag and next_tag.get("href"):
-                next_cand = next_tag["href"]
-                if next_cand and next_cand != "#" and not next_cand.startswith("javascript:"):
-                    next_url = urljoin(current_url, next_cand)
+        if "prevChap" in script_vars:
+            prev_cand = script_vars["prevChap"].strip()
+            if prev_cand and prev_cand != "#" and not prev_cand.startswith("javascript:"):
+                if not prev_cand.rstrip("/").endswith(bid):
+                    prev_url = cls._resolve_url(prev_cand, current_url, base_url)
+                    prev_source = "script_var:prevChap"
 
-        if not prev_url:
-            prev_tag = soup.select_one(".chapter_control a.back:not(.disabled), #gotochap a.back:not(.disabled)")
-            if prev_tag and prev_tag.get("href"):
-                prev_cand = prev_tag["href"]
-                if prev_cand and prev_cand != "#" and not prev_cand.startswith("javascript:"):
-                    prev_url = urljoin(current_url, prev_cand)
+        # 6.2. Fallback từ thẻ HTML <a> điều hướng nếu script không có hoặc không hợp lệ
+        all_nav_links = soup.select(".chapter_control a, #gotochap a, .chapter_wrap a, div.control a, a.next, a.prev, a.back")
+
+        if not next_url and all_nav_links:
+            # Ưu tiên rel="next"
+            for a in all_nav_links:
+                href = a.get("href", "").strip()
+                if not href or href == "#" or href.startswith("javascript:"):
+                    continue
+                rel = a.get("rel", [])
+                if isinstance(rel, list) and "next" in rel:
+                    next_url = cls._resolve_url(href, current_url, base_url)
+                    next_source = "html_nav:rel_next"
+                    break
+
+            # Ưu tiên văn bản chứa từ khóa 'chương tiếp', 'tiếp theo', 'chap sau'
+            if not next_url:
+                for a in all_nav_links:
+                    href = a.get("href", "").strip()
+                    if not href or href == "#" or href.startswith("javascript:"):
+                        continue
+                    text = a.get_text().strip().lower()
+                    # Không được chứa từ khóa của chương trước
+                    if any(k in text for k in ["chương trước", "trước", "quay lại", "lùi", "«", "<<"]):
+                        continue
+                    if any(k in text for k in ["chương tiếp", "tiếp theo", "chap sau", "tiếp >>", "tiếp >", "chương sau", "tiếp"]):
+                        next_url = cls._resolve_url(href, current_url, base_url)
+                        next_source = "html_nav:text"
+                        break
+
+            # Cuối cùng mới xét class="next" nhưng PHẢI loại trừ thẻ chứa chữ 'trước' (tránh lỗi vivutruyen)
+            if not next_url:
+                for a in all_nav_links:
+                    href = a.get("href", "").strip()
+                    if not href or href == "#" or href.startswith("javascript:"):
+                        continue
+                    classes = a.get("class", [])
+                    if "next" in classes:
+                        text = a.get_text().strip().lower()
+                        if not any(k in text for k in ["chương trước", "trước", "quay lại", "lùi", "«", "<<"]):
+                            next_url = cls._resolve_url(href, current_url, base_url)
+                            next_source = "html_nav:class_next"
+                            break
+
+        if not prev_url and all_nav_links:
+            # Ưu tiên rel="prev"
+            for a in all_nav_links:
+                href = a.get("href", "").strip()
+                if not href or href == "#" or href.startswith("javascript:") or href.rstrip("/").endswith(bid):
+                    continue
+                rel = a.get("rel", [])
+                if isinstance(rel, list) and "prev" in rel:
+                    prev_url = cls._resolve_url(href, current_url, base_url)
+                    prev_source = "html_nav:rel_prev"
+                    break
+
+            # Ưu tiên văn bản chứa từ khóa 'chương trước', 'quay lại', 'lùi'
+            if not prev_url:
+                for a in all_nav_links:
+                    href = a.get("href", "").strip()
+                    if not href or href == "#" or href.startswith("javascript:") or href.rstrip("/").endswith(bid):
+                        continue
+                    text = a.get_text().strip().lower()
+                    if any(k in text for k in ["tiếp theo", "chương tiếp", "chap sau", "tiếp"]):
+                        continue
+                    if any(k in text for k in ["chương trước", "trước", "quay lại", "lùi", "«", "<<"]):
+                        prev_url = cls._resolve_url(href, current_url, base_url)
+                        prev_source = "html_nav:text"
+                        break
 
         # 7. Ghép raw_content
         raw_content = "\n\n".join(paragraphs)
@@ -208,6 +291,8 @@ class SourceParser:
             "paragraphs": paragraphs,
             "prev_url": prev_url,
             "next_url": next_url,
+            "next_source": next_source,
+            "prev_source": prev_source,
             "content_hash": content_hash,
             "warnings": warnings,
         }

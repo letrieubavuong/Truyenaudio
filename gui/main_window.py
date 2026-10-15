@@ -85,18 +85,21 @@ class MainWindow(QMainWindow):
         self.spin_start_chap = QSpinBox()
         self.spin_start_chap.setRange(1, 99999)
         self.spin_start_chap.setValue(1)
+        self.spin_start_chap.setToolTip("Khoảng tải: Chương bắt đầu thu thập từ nguồn")
         cfg_layout.addWidget(self.spin_start_chap, 0, 1)
 
         cfg_layout.addWidget(QLabel("Chương kết thúc:"), 0, 2)
         self.spin_end_chap = QSpinBox()
         self.spin_end_chap.setRange(1, 99999)
-        self.spin_end_chap.setValue(4)
+        self.spin_end_chap.setValue(12)
+        self.spin_end_chap.setToolTip("Khoảng tải: Chương kết thúc thu thập (ví dụ: 1 đến 12 tải đủ 12 chương)")
         cfg_layout.addWidget(self.spin_end_chap, 0, 3)
 
         cfg_layout.addWidget(QLabel("Số chương / Tập:"), 0, 4)
         self.spin_per_vol = QSpinBox()
         self.spin_per_vol.setRange(1, 100)
         self.spin_per_vol.setValue(4)
+        self.spin_per_vol.setToolTip("Số chương mỗi tập (mặc định 4) CHỈ phục vụ bước gộp file TXT, không giới hạn số chương tải.")
         cfg_layout.addWidget(self.spin_per_vol, 0, 5)
 
         cfg_layout.addWidget(QLabel("Số tập bắt đầu:"), 0, 6)
@@ -341,10 +344,41 @@ class MainWindow(QMainWindow):
         self.table_chapters.update_chapters(chapters)
 
     def on_crawl_finished(self, res):
-        self.log("SUCCESS", "Hoàn tất giai đoạn thu thập / nạp dữ liệu.")
         chapters = self.storage.get_all_chapters(story_id=self.current_story_id)
         self.table_chapters.update_chapters(chapters)
-        self.start_spellcheck_analysis()
+
+        is_success = res.get("success", False) if isinstance(res, dict) else True
+        fetched = res.get("fetched_count", 0) if isinstance(res, dict) else len(chapters)
+        total = res.get("total_requested", 0) if isinstance(res, dict) else len(chapters)
+        status_msg = res.get("status_message", "") if isinstance(res, dict) else ""
+        stop_reason = res.get("stop_reason", "") if isinstance(res, dict) else ""
+
+        if not is_success and total > 0 and fetched < total:
+            warning_msg = f"Chưa hoàn tất: {fetched}/{total} chương. Nguyên nhân: {stop_reason or 'Tác vụ dừng sớm hơn yêu cầu.'}"
+            self.log("WARNING", warning_msg)
+            self.status_bar.showMessage(f"Chưa hoàn tất: {fetched}/{total} chương")
+
+            # Hộp thoại cảnh báo chưa hoàn tất
+            reply = QMessageBox.warning(
+                self,
+                "Thu thập chưa hoàn tất",
+                f"Tác vụ chưa hoàn tất: {fetched}/{total} chương.\n\n"
+                f"Nguyên nhân dừng: {stop_reason or 'Không xác định'}\n\n"
+                f"Bạn có muốn tiếp tục hiệu đính và xuất các chương đã có ({fetched} chương) không?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply == QMessageBox.Yes and fetched > 0:
+                self.start_spellcheck_analysis()
+            else:
+                self.btn_start.setEnabled(True)
+                self.btn_stop.setEnabled(False)
+                self.btn_pause.setEnabled(False)
+                self.btn_resume.setEnabled(False)
+        else:
+            self.log("SUCCESS", f"Hoàn tất thu thập dữ liệu: {fetched}/{total} chương.")
+            self.status_bar.showMessage(f"Đã tải đủ {fetched}/{total} chương")
+            self.start_spellcheck_analysis()
 
     def start_spellcheck_analysis(self):
         self.log("INFO", "Bắt đầu bước phân tích chính tả và chuẩn bị dữ liệu duyệt...")

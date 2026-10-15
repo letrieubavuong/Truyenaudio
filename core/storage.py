@@ -137,6 +137,22 @@ class StorageManager:
             conn.commit()
             return StoryInfo(id=cursor.lastrowid, url=url, title=title, author=author)
 
+    def get_story_by_url(self, url: str) -> Optional[StoryInfo]:
+        """Truy vấn thông tin truyện theo URL."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM stories WHERE url = ?", (url,))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return StoryInfo(
+                id=row["id"],
+                url=row["url"],
+                title=row["title"],
+                author=row["author"],
+                total_chapters=row["total_chapters"],
+            )
+
     def get_all_stories(self) -> List[StoryInfo]:
         with self._get_connection() as conn:
             cursor = conn.cursor()
