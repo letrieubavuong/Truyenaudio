@@ -10,6 +10,7 @@ import uuid
 @dataclass
 class SpellIssue:
     id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
+    original_hash: str = ""
     chapter_num: Optional[int] = None
     chapter_title: str = ""
     paragraph_idx: int = 0
@@ -21,10 +22,12 @@ class SpellIssue:
     reason: str = ""
     source: str = "rule"  # 'rule', 'dictionary', 'ai'
     status: str = "applied"  # 'applied', 'pending', 'rejected'
+    confidence: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "id": self.id,
+            "original_hash": self.original_hash,
             "chapter_num": self.chapter_num,
             "chapter_title": self.chapter_title,
             "paragraph_idx": self.paragraph_idx,
@@ -36,11 +39,18 @@ class SpellIssue:
             "reason": self.reason,
             "source": self.source,
             "status": self.status,
+            "confidence": self.confidence,
         }
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "SpellIssue":
-        return cls(**data)
+        valid_keys = {
+            "id", "original_hash", "chapter_num", "chapter_title",
+            "paragraph_idx", "char_start", "char_end", "original",
+            "replacement", "category", "reason", "source", "status", "confidence"
+        }
+        filtered = {k: v for k, v in data.items() if k in valid_keys}
+        return cls(**filtered)
 
 
 @dataclass
@@ -52,6 +62,7 @@ class Chapter:
     source_url: str = ""
     raw_content: str = ""
     content_hash: str = ""
+    version: int = 1
     fetch_time: Optional[datetime] = None
     status: str = "downloaded"  # 'downloaded', 'verified', 'failed', 'missing'
     prev_url: str = ""

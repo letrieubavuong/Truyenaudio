@@ -1,7 +1,7 @@
 """
 Main Window for Vietnamese Story Collector, Spell Checker & Volume Merger.
 Built with PySide6, clean light aesthetic, robust background threading,
-and intuitive side-by-side diff review.
+intuitive side-by-side diff review, and separate review/export phases.
 """
 import os
 import sys
@@ -12,17 +12,17 @@ from PySide6.QtWidgets import (
     QPushButton, QSpinBox, QCheckBox, QTabWidget, QProgressBar, QTextEdit,
     QFileDialog, QMessageBox, QGroupBox, QGridLayout, QStatusBar
 )
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon, QFont
 
 from core.storage import StorageManager
-from core.models import Chapter, SpellIssue
+from core.models import Chapter, Volume, SpellIssue
 from core.spellchecker import VietnameseSpellChecker
 from core.ai_checker import AIChecker
 from core.merger import VolumeMerger
 from gui.widgets import ChapterTableWidget, DiffReviewWidget
 from gui.dialogs import SettingsDialog
-from gui.workers import CrawlWorker, SpellCheckMergeWorker
+from gui.workers import CrawlWorker, SpellCheckWorker, ExportWorker
 
 
 class MainWindow(QMainWindow):
@@ -34,11 +34,16 @@ class MainWindow(QMainWindow):
 
         self.storage = StorageManager("crawler_state.db")
         self.spell_checker = VietnameseSpellChecker()
-        self.ai_checker = AIChecker()
+        self.ai_checker = AIChecker(protected_terms=self.spell_checker.protected_terms)
 
         self.crawl_worker: Optional[CrawlWorker] = None
-        self.merge_worker: Optional[SpellCheckMergeWorker] = None
+        self.spell_worker: Optional[SpellCheckWorker] = None
+        self.export_worker: Optional[ExportWorker] = None
+
         self.offline_import_dir: str = ""
+        self.current_story_id: int = self.storage.get_default_story_id()
+        self.current_volumes: List[Volume] = []
+        self.current_merger: Optional[VolumeMerger] = None
 
         self.init_ui()
         self.load_initial_data()
@@ -76,7 +81,6 @@ class MainWindow(QMainWindow):
         cfg_group = QGroupBox("2. Cấu Hình Gộp Tập & Hiệu Đính Chính Tả")
         cfg_layout = QGridLayout(cfg_group)
 
-        # Hàng 0: Phạm vi chương & số tập
         cfg_layout.addWidget(QLabel("Chương bắt đầu:"), 0, 0)
         self.spin_start_chap = QSpinBox()
         self.spin_start_chap.setRange(1, 99999)
@@ -92,7 +96,7 @@ class MainWindow(QMainWindow):
         cfg_layout.addWidget(QLabel("Số chương / Tập:"), 0, 4)
         self.spin_per_vol = QSpinBox()
         self.spin_per_vol.setRange(1, 100)
-        self.spin_per_vol.setValue(4)  # Mặc định 4
+        self.spin_per_vol.setValue(4)
         cfg_layout.addWidget(self.spin_per_vol, 0, 5)
 
         cfg_layout.addWidget(QLabel("Số tập bắt đầu:"), 0, 6)
@@ -101,7 +105,6 @@ class MainWindow(QMainWindow):
         self.spin_start_vol.setValue(1)
         cfg_layout.addWidget(self.spin_start_vol, 0, 7)
 
-        # Hàng 1: Thư mục xuất
         cfg_layout.addWidget(QLabel("Thư mục xuất:"), 1, 0)
         self.txt_output_dir = QLineEdit(os.path.abspath("output_volumes"))
         cfg_layout.addWidget(self.txt_output_dir, 1, 1, 1, 5)
@@ -114,7 +117,6 @@ class MainWindow(QMainWindow):
         self.btn_open_settings.clicked.connect(self.open_settings)
         cfg_layout.addWidget(self.btn_open_settings, 1, 7)
 
-        # Hàng 2: Các cờ tùy chọn
         chk_layout = QHBoxLayout()
         self.chk_download = QCheckBox("Thu thập / Nạp dữ liệu")
         self.chk_download.setChecked(True)
@@ -142,9 +144,14 @@ class MainWindow(QMainWindow):
 
         # 3. THANH ĐIỀU KHIỂN & TIẾN ĐỘ
         ctrl_layout = QHBoxLayout()
-        self.btn_start = QPushButton("▶ Bắt đầu")
+        self.btn_start = QPushButton("▶ Bắt đầu phân tích")
         self.btn_start.setObjectName("btn_start")
         self.btn_start.clicked.connect(self.start_process)
+
+        self.btn_export = QPushButton("💾 Áp dụng và xuất tập...")
+        self.btn_export.setEnabled(False)
+        self.btn_export.setStyleSheet("background-color: #2e7d32; color: white; font-weight: bold; padding: 6px 14px;")
+        self.btn_export.clicked.connect(self.start_export)
 
         self.btn_pause = QPushButton("⏸ Tạm dừng")
         self.btn_pause.setObjectName("btn_pause")
@@ -161,6 +168,7 @@ class MainWindow(QMainWindow):
         self.btn_stop.clicked.connect(self.stop_process)
 
         ctrl_layout.addWidget(self.btn_start)
+        ctrl_layout.addWidget(self.btn_export)
         ctrl_layout.addWidget(self.btn_pause)
         ctrl_layout.addWidget(self.btn_resume)
         ctrl_layout.addWidget(self.btn_stop)
@@ -187,7 +195,9 @@ class MainWindow(QMainWindow):
         tab1_layout.addWidget(QLabel("<b>Nhật ký tác vụ (Log):</b>"))
         self.txt_log = QTextEdit()
         self.txt_log.setReadOnly(True)
-        self.txt_log.setFont(QFont("Consolas", 10))
+        log_font = QFont("Consolas")
+        log_font.setPointSize(10)
+        self.txt_log.setFont(log_font)
         self.txt_log.setMaximumHeight(150)
         tab1_layout.addWidget(self.txt_log, 1)
 
@@ -195,6 +205,7 @@ class MainWindow(QMainWindow):
 
         # Tab 2: Xem trước & Duyệt lỗi
         self.diff_widget = DiffReviewWidget()
+        self.diff_widget.decisions_changed.connect(self.on_decisions_changed)
         self.tabs_main.addTab(self.diff_widget, "🔍 Xem Trước & Duyệt Lỗi")
 
         # Tab 3: Báo cáo & Thư mục xuất
@@ -212,7 +223,9 @@ class MainWindow(QMainWindow):
 
         self.txt_report_viewer = QTextEdit()
         self.txt_report_viewer.setReadOnly(True)
-        self.txt_report_viewer.setFont(QFont("Segoe UI", 10))
+        report_font = QFont("Segoe UI")
+        report_font.setPointSize(10)
+        self.txt_report_viewer.setFont(report_font)
         tab3_layout.addWidget(self.txt_report_viewer)
 
         self.tabs_main.addTab(tab3_widget, "📊 Báo Cáo Markdown")
@@ -226,10 +239,15 @@ class MainWindow(QMainWindow):
 
     def load_initial_data(self):
         """Nạp danh sách chương hiện có trong SQLite lên bảng hiển thị."""
-        chapters = self.storage.get_all_chapters(story_id=1)
+        story_info = self.storage.get_or_create_story(
+            url=self.txt_story_url.text().strip(),
+            title="Phàm Nhân Tu Tiên"
+        )
+        self.current_story_id = story_info.id or 1
+        chapters = self.storage.get_all_chapters(story_id=self.current_story_id)
         self.table_chapters.update_chapters(chapters)
         if chapters:
-            self.log("INFO", f"Đã nạp {len(chapters)} chương từ CSDL lưu trữ SQLite.")
+            self.log("INFO", f"Đã nạp {len(chapters)} chương từ CSDL lưu trữ SQLite (Story ID: {self.current_story_id}).")
 
     def log(self, level: str, msg: str):
         color_map = {
@@ -265,9 +283,13 @@ class MainWindow(QMainWindow):
     def open_settings(self):
         dlg = SettingsDialog(self)
         if dlg.exec():
-            # Tải lại từ điển
             self.spell_checker.load_resources()
+            self.ai_checker.set_protected_terms(self.spell_checker.protected_terms)
             self.log("SUCCESS", "Đã cập nhật cấu hình từ điển và danh từ riêng bảo vệ.")
+
+    def on_decisions_changed(self, issues: List[SpellIssue]):
+        """Lưu lại quyết định duyệt vào SQLite để bảo toàn tiến độ."""
+        self.storage.save_review_decisions(self.current_story_id, issues)
 
     def start_process(self):
         start_chap = self.spin_start_chap.value()
@@ -276,8 +298,15 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Lỗi phạm vi", "Chương bắt đầu không được lớn hơn chương kết thúc.")
             return
 
+        story_info = self.storage.get_or_create_story(
+            url=self.txt_story_url.text().strip(),
+            title="Phàm Nhân Tu Tiên"
+        )
+        self.current_story_id = story_info.id or 1
+
         self.btn_start.setEnabled(False)
-        self.btn_pause.setEnabled(True)
+        self.btn_export.setEnabled(False)
+        self.btn_pause.setEnabled(True if self.chk_download.isChecked() and not self.offline_import_dir else False)
         self.btn_resume.setEnabled(False)
         self.btn_stop.setEnabled(True)
         self.prog_bar.setValue(0)
@@ -285,7 +314,6 @@ class MainWindow(QMainWindow):
         do_download = self.chk_download.isChecked()
 
         if do_download:
-            # Chạy bước 1: Thu thập hoặc Nạp offline
             self.crawl_worker = CrawlWorker(
                 storage=self.storage,
                 story_url=self.txt_story_url.text().strip(),
@@ -301,8 +329,7 @@ class MainWindow(QMainWindow):
             self.crawl_worker.finished_error.connect(self.on_worker_error)
             self.crawl_worker.start()
         else:
-            # Bỏ qua bước tải, chạy trực tiếp gộp & sửa lỗi
-            self.start_spellcheck_and_merge()
+            self.start_spellcheck_analysis()
 
     def on_progress(self, curr, total, msg):
         pct = int((curr / max(1, total)) * 100)
@@ -310,95 +337,131 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage(msg)
 
     def on_chapter_saved(self, chapter: Chapter):
-        # Cập nhật lại bảng
-        chapters = self.storage.get_all_chapters(story_id=1)
+        chapters = self.storage.get_all_chapters(story_id=self.current_story_id)
         self.table_chapters.update_chapters(chapters)
 
     def on_crawl_finished(self, res):
         self.log("SUCCESS", "Hoàn tất giai đoạn thu thập / nạp dữ liệu.")
-        # Cập nhật bảng
-        chapters = self.storage.get_all_chapters(story_id=1)
+        chapters = self.storage.get_all_chapters(story_id=self.current_story_id)
         self.table_chapters.update_chapters(chapters)
+        self.start_spellcheck_analysis()
 
-        # Chuyển sang bước 2: Sửa lỗi & Gộp tập
-        if self.chk_spellcheck.isChecked() or self.chk_merge.isChecked():
-            self.start_spellcheck_and_merge()
-        else:
-            self.reset_controls()
+    def start_spellcheck_analysis(self):
+        self.log("INFO", "Bắt đầu bước phân tích chính tả và chuẩn bị dữ liệu duyệt...")
+        self.btn_pause.setEnabled(False)
+        self.btn_resume.setEnabled(False)
 
-    def start_spellcheck_and_merge(self):
-        self.log("INFO", "Bắt đầu bước hiệu đính chính tả và gộp tập...")
         merger = VolumeMerger(
             chapters_per_volume=self.spin_per_vol.value(),
             allow_partial_last_volume=self.chk_allow_partial.isChecked(),
         )
+        self.current_merger = merger
 
-        self.merge_worker = SpellCheckMergeWorker(
+        self.spell_worker = SpellCheckWorker(
             storage=self.storage,
             checker=self.spell_checker,
             merger=merger,
+            story_id=self.current_story_id,
             start_chap=self.spin_start_chap.value(),
             end_chap=self.spin_end_chap.value(),
             start_vol=self.spin_start_vol.value(),
-            output_dir=self.txt_output_dir.text().strip(),
-            overwrite=self.chk_overwrite.isChecked(),
+            do_spellcheck=self.chk_spellcheck.isChecked(),
             use_ai=self.chk_use_ai.isChecked(),
             ai_checker=self.ai_checker if self.chk_use_ai.isChecked() else None,
         )
-        self.merge_worker.progress_changed.connect(self.on_progress)
-        self.merge_worker.log_message.connect(self.log)
-        self.merge_worker.issues_ready.connect(self.on_issues_ready)
-        self.merge_worker.finished_success.connect(self.on_merge_finished)
-        self.merge_worker.finished_error.connect(self.on_worker_error)
-        self.merge_worker.start()
+        self.spell_worker.progress_changed.connect(self.on_progress)
+        self.spell_worker.log_message.connect(self.log)
+        self.spell_worker.issues_ready.connect(self.on_issues_ready)
+        self.spell_worker.finished_analysis.connect(self.on_analysis_finished)
+        self.spell_worker.finished_error.connect(self.on_worker_error)
+        self.spell_worker.start()
 
-    def on_issues_ready(self, issues: List[SpellIssue], edited_paragraphs_map: Dict[int, List[str]]):
-        # Nạp dữ liệu vào màn hình xem trước đúng định dạng TXT sẽ xuất
-        chapters = self.storage.get_chapters_range(
-            story_id=1,
-            start_chap=self.spin_start_chap.value(),
-            end_chap=self.spin_end_chap.value(),
+    def on_issues_ready(
+        self,
+        issues: List[SpellIssue],
+        chapters: List[Chapter],
+        volumes: List[Volume],
+        original_paragraphs_map: Dict[int, List[str]],
+    ):
+        self.current_volumes = volumes
+        self.diff_widget.load_data(
+            issues=issues,
+            volumes=volumes,
+            merger=self.current_merger,
+            original_paragraphs_map=original_paragraphs_map,
         )
-        merger = VolumeMerger(
-            chapters_per_volume=self.spin_per_vol.value(),
-            allow_partial_last_volume=self.chk_allow_partial.isChecked(),
+        self.log("INFO", f"Đã nạp {len(issues)} đề xuất vào màn hình duyệt lỗi.")
+
+    def on_analysis_finished(self, total_issues: int):
+        self.log("SUCCESS", f"Hoàn tất phân tích ({total_issues} đề xuất). Sẵn sàng để duyệt.")
+        self.prog_bar.setValue(100)
+        self.btn_start.setEnabled(True)
+        self.btn_export.setEnabled(True)
+        self.btn_stop.setEnabled(False)
+
+        # Chuyển người dùng sang Tab 2 để duyệt lỗi trước khi xuất
+        self.tabs_main.setCurrentIndex(1)
+        self.status_bar.showMessage("Vui lòng duyệt các đề xuất, sau đó bấm 'Áp dụng và xuất tập...'.")
+
+    def start_export(self):
+        """Bắt đầu bước xuất tập chính thức sau khi người dùng đã duyệt."""
+        if not self.current_volumes or not self.current_merger:
+            QMessageBox.warning(self, "Chưa có dữ liệu", "Vui lòng chạy phân tích trước khi xuất tập.")
+            return
+
+        final_issues = self.diff_widget.issues
+        edited_paragraphs_map = self.diff_widget.get_edited_paragraphs_map()
+        out_dir = self.txt_output_dir.text().strip()
+
+        # Kiểm tra ghi đè an toàn trước khi chạy
+        if not self.chk_overwrite.isChecked():
+            for vol in self.current_volumes:
+                raw_path = os.path.join(out_dir, f"{vol.filename_base}_RAW.txt")
+                if os.path.exists(raw_path):
+                    QMessageBox.warning(
+                        self,
+                        "Tệp đã tồn tại",
+                        f"Tệp '{os.path.basename(raw_path)}' đã tồn tại trong thư mục xuất.\n"
+                        "Vui lòng bật cờ 'Ghi đè file nếu đã có' hoặc đổi thư mục xuất."
+                    )
+                    return
+
+        self.btn_start.setEnabled(False)
+        self.btn_export.setEnabled(False)
+        self.btn_stop.setEnabled(True)
+        self.prog_bar.setValue(0)
+        self.log("INFO", f"Bắt đầu xuất {len(self.current_volumes)} tập vào: {out_dir}...")
+
+        self.export_worker = ExportWorker(
+            volumes=self.current_volumes,
+            issues=final_issues,
+            edited_paragraphs_map=edited_paragraphs_map,
+            output_dir=out_dir,
+            merger=self.current_merger,
+            overwrite=self.chk_overwrite.isChecked(),
         )
-        volumes = merger.build_volumes(
-            chapters=chapters,
-            start_volume_num=self.spin_start_vol.value(),
-            expected_start_chap=self.spin_start_chap.value(),
-            expected_end_chap=self.spin_end_chap.value(),
-            story_title="Phàm Nhân Tu Tiên",
-        )
+        self.export_worker.progress_changed.connect(self.on_progress)
+        self.export_worker.log_message.connect(self.log)
+        self.export_worker.finished_success.connect(self.on_export_finished)
+        self.export_worker.finished_error.connect(self.on_worker_error)
+        self.export_worker.start()
 
-        raw_parts = [merger.render_volume_text(v, use_edited=False) for v in volumes]
-        edited_parts = [
-            merger.render_volume_text(v, use_edited=True, chapter_paragraphs_map=edited_paragraphs_map)
-            for v in volumes
-        ]
-
-        raw_full = "\r\n\r\n".join(raw_parts)
-        edited_full = "\r\n\r\n".join(edited_parts)
-
-        self.diff_widget.load_data(issues, raw_full, edited_full)
-        self.log("INFO", f"Đã tải {len(issues)} đề xuất vào màn hình Xem trước & Duyệt lỗi.")
-
-    def on_merge_finished(self, bundles: List[Dict[str, str]]):
-        self.log("SUCCESS", f"Hoàn tất toàn bộ quy trình! Đã xuất {len(bundles)} tập.")
+    def on_export_finished(self, bundles: List[Dict[str, str]]):
+        self.log("SUCCESS", f"Hoàn tất xuất file! Đã xuất an toàn {len(bundles)} tập truyện.")
         self.prog_bar.setValue(100)
 
-        # Hiển thị báo cáo của tập đầu tiên lên tab Report
         if bundles and "report" in bundles[0]:
             try:
                 with open(bundles[0]["report"], "r", encoding="utf-8") as f:
                     self.txt_report_viewer.setPlainText(f.read())
+                self.tabs_main.setCurrentIndex(2)
             except Exception:
                 pass
 
         QMessageBox.information(
             self,
-            "Hoàn thành xuất tập",
-            f"Đã xử lý và xuất thành công {len(bundles)} tập truyện vào thư mục:\n{self.txt_output_dir.text()}"
+            "Xuất tập thành công",
+            f"Đã xuất thành công {len(bundles)} tập truyện vào thư mục:\n{self.txt_output_dir.text()}"
         )
         self.reset_controls()
 
@@ -412,25 +475,28 @@ class MainWindow(QMainWindow):
             self.crawl_worker.pause()
             self.btn_pause.setEnabled(False)
             self.btn_resume.setEnabled(True)
-            self.log("WARNING", "Đã tạm dừng tác vụ.")
+            self.log("WARNING", "Đã tạm dừng tác vụ thu thập.")
 
     def resume_process(self):
         if self.crawl_worker and self.crawl_worker.isRunning():
             self.crawl_worker.resume()
             self.btn_pause.setEnabled(True)
             self.btn_resume.setEnabled(False)
-            self.log("INFO", "Tiếp tục tác vụ.")
+            self.log("INFO", "Tiếp tục tác vụ thu thập.")
 
     def stop_process(self):
         if self.crawl_worker and self.crawl_worker.isRunning():
             self.crawl_worker.stop()
-        if self.merge_worker and self.merge_worker.isRunning():
-            self.merge_worker.stop()
-        self.log("WARNING", "Đang dừng tác vụ theo yêu cầu người dùng...")
+        if self.spell_worker and self.spell_worker.isRunning():
+            self.spell_worker.stop()
+        if self.export_worker and self.export_worker.isRunning():
+            self.export_worker.stop()
+        self.log("WARNING", "Đã hủy tác vụ theo yêu cầu người dùng.")
         self.reset_controls()
 
     def reset_controls(self):
         self.btn_start.setEnabled(True)
+        self.btn_export.setEnabled(True if self.current_volumes else False)
         self.btn_pause.setEnabled(False)
         self.btn_resume.setEnabled(False)
         self.btn_stop.setEnabled(False)

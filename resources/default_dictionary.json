@@ -1,6 +1,6 @@
 {
   "description": "Từ điển sửa lỗi chính tả tiếng Việt có thể chỉnh sửa",
-  "version": "1.0",
+  "version": "1.1",
   "replacements": {
     "ban đâu": "ban đầu",
     "nguời": "người",
@@ -9,6 +9,7 @@
     "mầu mỡ": "màu mỡ",
     "thương xuyên": "thường xuyên",
     "sãn": "sẵn",
+    "bổng nhiên": "bỗng nhiên",
     "qui định": "quy định",
     "quí khách": "quý khách",
     "chưởng quĩ": "chưởng quỹ",
@@ -18,18 +19,26 @@
     "sáng lạng": "xán lạn",
     "sơ xuất": "sơ suất",
     "xuống giòng": "xuống dòng",
-    "chần chừ": "chần chừ",
-    "chần chờ": "chần chờ",
-    "giấu giếm": "giấu giếm",
+    "trần trừ": "chần chừ",
+    "giấu diếm": "giấu giếm",
+    "suông sẻ": "suôn sẻ",
     "bổ xung": "bổ sung",
     "chắp bút": "chấp bút",
-    "suôn sẻ": "suôn sẻ",
     "sát nhập": "sáp nhập",
-    "bàng quan": "bàng quan",
     "vô hình chung": "vô hình trung",
     "chuẩn hoá": "chuẩn hóa",
     "bão hoà": "bão hòa",
-    "hoả tiễn": "hỏa tiễn"
+    "hoả tiễn": "hỏa tiễn",
+    "bươn trải": "bươn chải",
+    "cọ sát": "cọ xát",
+    "giành dụm": "dành dụm",
+    "đầy ấp": "đầy ắp",
+    "đỗ vỡ": "đổ vỡ",
+    "chuẩn xát": "chuẩn xác",
+    "chau chuốt": "trau chuốt",
+    "chín mùi": "chín muồi",
+    "trực chờ": "chực chờ",
+    "đường xá": "đường sá"
   },
   "context_rules": [
     {

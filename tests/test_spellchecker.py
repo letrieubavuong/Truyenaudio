@@ -33,8 +33,15 @@ class TestVietnameseSpellChecker(unittest.TestCase):
     def test_clean_star(self):
         text = 'thật nhiều hồng tương quả*, loại quả mà muội muội hắn thích nhất.'
         edited, issues = self.checker.check_paragraph(text, paragraph_idx=0)
-        self.assertNotIn("*", edited)
-        self.assertIn('hồng tương quả', edited)
+        # Theo yêu cầu an toàn, dấu sao cuối từ có thể là chú thích nên mặc định pending chờ duyệt
+        star_issues = [i for i in issues if i.category == "dau_cau" and "*" in i.original]
+        self.assertTrue(len(star_issues) > 0)
+        self.assertEqual(star_issues[0].status, "pending")
+        # Khi được duyệt (status='applied'), dấu sao được loại bỏ
+        star_issues[0].status = "applied"
+        approved_edited = self.checker.apply_fixes(text, issues, approved_only=True)
+        self.assertNotIn("*", approved_edited)
+        self.assertIn('hồng tương quả', approved_edited)
 
     def test_dictionary_replacement(self):
         text = 'nhìn không còn ra hình dạng ban đâu, phảng phất có nguời đi tới.'
@@ -58,8 +65,14 @@ class TestVietnameseSpellChecker(unittest.TestCase):
     def test_duplicate_sentences(self):
         text = 'Đây là một câu rất quan trọng trong truyện. Đây là một câu rất quan trọng trong truyện. Tiếp theo là đoạn sau.'
         edited, issues = self.checker.check_paragraph(text, paragraph_idx=0)
-        # Chỉ còn 1 câu
-        count = edited.count('Đây là một câu rất quan trọng trong truyện.')
+        # Mặc định đề xuất ở trạng thái pending để tránh xóa nhầm lời thoại cố ý lặp
+        dup_issues = [i for i in issues if i.category == "lap_cau"]
+        self.assertTrue(len(dup_issues) > 0)
+        self.assertEqual(dup_issues[0].status, "pending")
+        # Khi được duyệt (applied), câu trùng lặp được loại bỏ
+        dup_issues[0].status = "applied"
+        approved_edited = self.checker.apply_fixes(text, issues, approved_only=True)
+        count = approved_edited.count('Đây là một câu rất quan trọng trong truyện.')
         self.assertEqual(count, 1)
 
     def test_real_chapter_1(self):

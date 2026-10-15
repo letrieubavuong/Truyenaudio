@@ -2,14 +2,16 @@
 Rule-based Vietnamese Spell Checker and Text Normalizer.
 Features:
 - Unicode NFC normalization (not counted as spelling error)
-- Removal of stray underscores, stars, duplicate punctuation, and spacing issues
+- Removal of stray underscores and spacing issues without damaging masked words
 - Custom dictionary with regex and context rules
 - Protected terms preservation (characters, artifacts, sects, locations)
-- Strict duplicate sentence detection
-- Precise character offset tracking for audit trail and manual review
+- Strict duplicate sentence detection (marked as pending review by default)
+- Precise character offset tracking for changelog audit trail and manual review
+- Guaranteed exact idempotence: EDITED text is 100% reproducible from RAW text + changelog
 """
 import re
 import json
+import hashlib
 import unicodedata
 from typing import List, Dict, Tuple, Optional
 from core.models import SpellIssue
@@ -33,7 +35,13 @@ class VietnameseSpellChecker:
         try:
             with open(self.dictionary_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                self.dictionary_map = data.get("replacements", {})
+                raw_map = data.get("replacements", {})
+                # Lọc bỏ các cặp từ không thay đổi nội dung (original == replacement)
+                self.dictionary_map = {
+                    k: v
+                    for k, v in raw_map.items()
+                    if k.strip().lower() != v.strip().lower()
+                }
                 self.context_rules = data.get("context_rules", [])
         except Exception:
             self.dictionary_map = {}
@@ -54,10 +62,12 @@ class VietnameseSpellChecker:
         chapter_title: str = "",
     ) -> Tuple[str, List[SpellIssue]]:
         """
-        Kiểm tra và sửa lỗi một đoạn văn:
-        Ghi nhận các issue và sinh văn bản đã sửa.
+        Kiểm tra và sinh các đề xuất sửa lỗi cho một đoạn văn:
+        Ghi nhận chính xác vị trí char_start, char_end và băm SHA-256 bản gốc.
+        Mọi thay đổi đều được ghi lại trong danh sách issue, không sửa lén bằng regex bên ngoài.
         """
         norm_para = unicodedata.normalize("NFC", paragraph)
+        para_hash = hashlib.sha256(norm_para.encode("utf-8")).hexdigest()[:16]
         issues: List[SpellIssue] = []
 
         # Danh sách vùng bảo vệ
@@ -68,6 +78,12 @@ class VietnameseSpellChecker:
             for m in re.finditer(re.escape(term), norm_para):
                 protected_spans.append((m.start(), m.end()))
 
+        # BẢO VỆ TỪ BỊ CHE DẤU SAO: ví dụ c*m, v**, đ**, ***
+        # Các từ chứa ký tự * nằm trong từ hoặc tạo thành từ bị che không bao giờ bị xóa dấu *
+        masked_pat = r"(?<!\S)[a-zA-ZÀ-ỹ0-9]*\*+[a-zA-ZÀ-ỹ0-9*]*(?!\S)|\b[a-zA-ZÀ-ỹ0-9]+\*+[a-zA-ZÀ-ỹ0-9]+\b|\b[a-zA-ZÀ-ỹ0-9]{1,2}\*+"
+        for m in re.finditer(masked_pat, norm_para):
+            protected_spans.append((m.start(), m.end()))
+
         def is_in_protected(start: int, end: int) -> bool:
             for p_start, p_end in protected_spans:
                 if max(start, p_start) < min(end, p_end):
@@ -75,36 +91,51 @@ class VietnameseSpellChecker:
             return False
 
         # --- A. DỌN GẠCH DƯỚI THỪA & KÝ TỰ RÁC ---
-        # Bắt tất cả các chuỗi gạch dưới lặp hoặc đơn lẻ (ví dụ: _ hoặc _ _ _ _ hoặc dính sát ")
-        for m in re.finditer(r"_+(?:\s*_+)*", norm_para):
+        for m in re.finditer(r"(\s*)_+(?:\s*_+)*(\s*)", norm_para):
             start, end = m.start(), m.end()
             orig = norm_para[start:end]
-            if not is_in_protected(start, end):
+            if is_in_protected(start, end) or not orig:
+                continue
+
+            has_leading = bool(m.group(1))
+            has_trailing = bool(m.group(2))
+            if has_leading and has_trailing:
+                rep = " "
+            elif has_leading and not has_trailing:
+                rep = " "
+            else:
+                rep = ""
+
+            if orig != rep:
                 issues.append(
                     SpellIssue(
+                        id=f"iss_c{chapter_num}_p{paragraph_idx}_{start}_{end}_undr",
+                        original_hash=para_hash,
                         chapter_num=chapter_num,
                         chapter_title=chapter_title,
                         paragraph_idx=paragraph_idx,
                         char_start=start,
                         char_end=end,
                         original=orig,
-                        replacement="",
+                        replacement=rep,
                         category="gach_duoi_thua",
-                        reason="Loại bỏ dấu gạch dưới thừa",
+                        reason="Loại bỏ dấu gạch dưới thừa và chuẩn hóa khoảng trắng",
                         source="rule",
                         status="applied",
                     )
                 )
 
-        # 3. Dấu sao thừa sau chữ
-        for m in re.finditer(r"([a-zA-ZÀ-ỹ0-9])\*(?!\*)", norm_para):
-            start = m.start(1)
-            end = m.end()
+        # Dấu sao ở cuối từ ngoài vùng được bảo vệ (nghi ngờ chú thích / footnote):
+        # Mặc định chuyển sang chờ duyệt (pending), không tự xóa.
+        for m in re.finditer(r"([a-zA-ZÀ-ỹ0-9])\*+(?=\s|[.,!?:;]|$)", norm_para):
+            start, end = m.start(1), m.end()
             orig = norm_para[start:end]
             rep = m.group(1)
-            if not is_in_protected(start, end):
+            if not is_in_protected(start, end) and orig != rep:
                 issues.append(
                     SpellIssue(
+                        id=f"iss_c{chapter_num}_p{paragraph_idx}_{start}_{end}_star",
+                        original_hash=para_hash,
                         chapter_num=chapter_num,
                         chapter_title=chapter_title,
                         paragraph_idx=paragraph_idx,
@@ -113,21 +144,47 @@ class VietnameseSpellChecker:
                         original=orig,
                         replacement=rep,
                         category="dau_cau",
-                        reason="Loại bỏ dấu hoa thị (*) thừa dính sau từ",
+                        reason="Dấu hoa thị sau từ (nghi chú thích hoặc ký tự thừa, chờ duyệt)",
+                        source="rule",
+                        status="pending",
+                    )
+                )
+
+        # --- B. KHOẢNG TRẮNG VÀ DẤU CÂU ---
+        # 1. Khoảng trắng trước dấu câu VÀ thiếu khoảng trắng sau (ví dụ: " ,là" -> ", là")
+        for m in re.finditer(r"\s+([.,!?:;])(?=[a-zA-ZÀ-ỹ0-9])", norm_para):
+            start, end = m.start(), m.end()
+            orig = norm_para[start:end]
+            rep = f"{m.group(1)} "
+            if not is_in_protected(start, end) and orig != rep:
+                issues.append(
+                    SpellIssue(
+                        id=f"iss_c{chapter_num}_p{paragraph_idx}_{start}_{end}_pnc1",
+                        original_hash=para_hash,
+                        chapter_num=chapter_num,
+                        chapter_title=chapter_title,
+                        paragraph_idx=paragraph_idx,
+                        char_start=start,
+                        char_end=end,
+                        original=orig,
+                        replacement=rep,
+                        category="dau_cau",
+                        reason="Chuẩn hóa khoảng trắng trước và sau dấu câu",
                         source="rule",
                         status="applied",
                     )
                 )
 
-        # --- B. KHOẢNG TRẮNG VÀ DẤU CÂU ---
-        # 1. Khoảng trắng trước dấu câu: " ," hoặc " ."
-        for m in re.finditer(r"\s+([.,!?:;])", norm_para):
+        # 2. Khoảng trắng trước dấu câu khi đã có khoảng trắng/kết thúc sau (ví dụ: " ," hoặc " .")
+        for m in re.finditer(r"\s+([.,!?:;])(?=\s|$)", norm_para):
             start, end = m.start(), m.end()
             orig = norm_para[start:end]
             rep = m.group(1)
-            if not is_in_protected(start, end):
+            if not is_in_protected(start, end) and orig != rep:
                 issues.append(
                     SpellIssue(
+                        id=f"iss_c{chapter_num}_p{paragraph_idx}_{start}_{end}_spcp",
+                        original_hash=para_hash,
                         chapter_num=chapter_num,
                         chapter_title=chapter_title,
                         paragraph_idx=paragraph_idx,
@@ -142,14 +199,16 @@ class VietnameseSpellChecker:
                     )
                 )
 
-        # 2. Dấu câu dính liền chữ tiếp theo không có khoảng trắng: ".Từ" hoặc ",nói"
-        for m in re.finditer(r"([.,!?:;])([a-zA-ZÀ-ỹ])", norm_para):
+        # 3. Dấu câu dính liền chữ tiếp theo không có khoảng trắng (ví dụ: ",nói", ".Từ", nhưng bỏ qua số như 3.14)
+        for m in re.finditer(r"(?<!\s)([.,!?:;])(?=[a-zA-ZÀ-ỹ])", norm_para):
             start, end = m.start(), m.end()
             orig = norm_para[start:end]
-            rep = f"{m.group(1)} {m.group(2)}"
-            if not is_in_protected(start, end):
+            rep = f"{m.group(1)} "
+            if not is_in_protected(start, end) and orig != rep:
                 issues.append(
                     SpellIssue(
+                        id=f"iss_c{chapter_num}_p{paragraph_idx}_{start}_{end}_pnc2",
+                        original_hash=para_hash,
                         chapter_num=chapter_num,
                         chapter_title=chapter_title,
                         paragraph_idx=paragraph_idx,
@@ -164,69 +223,80 @@ class VietnameseSpellChecker:
                     )
                 )
 
-        # 3. Dấu ngoặc đơn có khoảng trắng thừa
+        # 4. Khoảng trắng thừa bên trong dấu ngoặc đơn
         for m in re.finditer(r"\(\s+([a-zA-ZÀ-ỹ0-9])", norm_para):
             start, end = m.start(), m.end()
             orig = norm_para[start:end]
             rep = f"({m.group(1)}"
-            issues.append(
-                SpellIssue(
-                    chapter_num=chapter_num,
-                    chapter_title=chapter_title,
-                    paragraph_idx=paragraph_idx,
-                    char_start=start,
-                    char_end=end,
-                    original=orig,
-                    replacement=rep,
-                    category="khoang_trang",
-                    reason="Xóa khoảng trắng sau mở ngoặc đơn",
-                    source="rule",
-                    status="applied",
+            if orig != rep:
+                issues.append(
+                    SpellIssue(
+                        id=f"iss_c{chapter_num}_p{paragraph_idx}_{start}_{end}_brk1",
+                        original_hash=para_hash,
+                        chapter_num=chapter_num,
+                        chapter_title=chapter_title,
+                        paragraph_idx=paragraph_idx,
+                        char_start=start,
+                        char_end=end,
+                        original=orig,
+                        replacement=rep,
+                        category="khoang_trang",
+                        reason="Xóa khoảng trắng sau mở ngoặc đơn",
+                        source="rule",
+                        status="applied",
+                    )
                 )
-            )
 
         for m in re.finditer(r"([a-zA-ZÀ-ỹ0-9])\s+\)", norm_para):
             start, end = m.start(), m.end()
             orig = norm_para[start:end]
             rep = f"{m.group(1)})"
-            issues.append(
-                SpellIssue(
-                    chapter_num=chapter_num,
-                    chapter_title=chapter_title,
-                    paragraph_idx=paragraph_idx,
-                    char_start=start,
-                    char_end=end,
-                    original=orig,
-                    replacement=rep,
-                    category="khoang_trang",
-                    reason="Xóa khoảng trắng trước đóng ngoặc đơn",
-                    source="rule",
-                    status="applied",
+            if orig != rep:
+                issues.append(
+                    SpellIssue(
+                        id=f"iss_c{chapter_num}_p{paragraph_idx}_{start}_{end}_brk2",
+                        original_hash=para_hash,
+                        chapter_num=chapter_num,
+                        chapter_title=chapter_title,
+                        paragraph_idx=paragraph_idx,
+                        char_start=start,
+                        char_end=end,
+                        original=orig,
+                        replacement=rep,
+                        category="khoang_trang",
+                        reason="Xóa khoảng trắng trước đóng ngoặc đơn",
+                        source="rule",
+                        status="applied",
+                    )
                 )
-            )
 
-        # 4. Nhiều dấu cách liên tiếp
+        # 5. Nhiều dấu cách liên tiếp
         for m in re.finditer(r"[^\S\r\n]{2,}", norm_para):
             start, end = m.start(), m.end()
             orig = norm_para[start:end]
-            issues.append(
-                SpellIssue(
-                    chapter_num=chapter_num,
-                    chapter_title=chapter_title,
-                    paragraph_idx=paragraph_idx,
-                    char_start=start,
-                    char_end=end,
-                    original=orig,
-                    replacement=" ",
-                    category="khoang_trang",
-                    reason="Thu gọn nhiều khoảng trắng liên tiếp",
-                    source="rule",
-                    status="applied",
+            if orig != " ":
+                issues.append(
+                    SpellIssue(
+                        id=f"iss_c{chapter_num}_p{paragraph_idx}_{start}_{end}_multispc",
+                        original_hash=para_hash,
+                        chapter_num=chapter_num,
+                        chapter_title=chapter_title,
+                        paragraph_idx=paragraph_idx,
+                        char_start=start,
+                        char_end=end,
+                        original=orig,
+                        replacement=" ",
+                        category="khoang_trang",
+                        reason="Thu gọn nhiều khoảng trắng liên tiếp",
+                        source="rule",
+                        status="applied",
+                    )
                 )
-            )
 
         # --- C. TỪ ĐIỂN VÀ QUY TẮC NGỮ CẢNH ---
         for wrong, correct in self.dictionary_map.items():
+            if not wrong or not correct or wrong.strip().lower() == correct.strip().lower():
+                continue
             pattern = rf"(?<!\w){re.escape(wrong)}(?!\w)"
             for m in re.finditer(pattern, norm_para, re.IGNORECASE):
                 start, end = m.start(), m.end()
@@ -238,21 +308,24 @@ class VietnameseSpellChecker:
                     elif orig and orig[0].isupper():
                         rep = correct.capitalize()
 
-                    issues.append(
-                        SpellIssue(
-                            chapter_num=chapter_num,
-                            chapter_title=chapter_title,
-                            paragraph_idx=paragraph_idx,
-                            char_start=start,
-                            char_end=end,
-                            original=orig,
-                            replacement=rep,
-                            category="chinh_ta",
-                            reason=f"Sửa lỗi từ điển: '{wrong}' -> '{correct}'",
-                            source="dictionary",
-                            status="applied",
+                    if orig != rep:
+                        issues.append(
+                            SpellIssue(
+                                id=f"iss_c{chapter_num}_p{paragraph_idx}_{start}_{end}_dict",
+                                original_hash=para_hash,
+                                chapter_num=chapter_num,
+                                chapter_title=chapter_title,
+                                paragraph_idx=paragraph_idx,
+                                char_start=start,
+                                char_end=end,
+                                original=orig,
+                                replacement=rep,
+                                category="chinh_ta",
+                                reason=f"Sửa lỗi từ điển: '{wrong}' -> '{correct}'",
+                                source="dictionary",
+                                status="applied",
+                            )
                         )
-                    )
 
         for rule in self.context_rules:
             pat = rule.get("pattern", "")
@@ -266,23 +339,26 @@ class VietnameseSpellChecker:
                 orig = norm_para[start:end]
                 if not is_in_protected(start, end):
                     rep = m.expand(rep_tpl)
-                    issues.append(
-                        SpellIssue(
-                            chapter_num=chapter_num,
-                            chapter_title=chapter_title,
-                            paragraph_idx=paragraph_idx,
-                            char_start=start,
-                            char_end=end,
-                            original=orig,
-                            replacement=rep,
-                            category=cat,
-                            reason=reason,
-                            source="rule",
-                            status="applied",
+                    if orig != rep:
+                        issues.append(
+                            SpellIssue(
+                                id=f"iss_c{chapter_num}_p{paragraph_idx}_{start}_{end}_ctx",
+                                original_hash=para_hash,
+                                chapter_num=chapter_num,
+                                chapter_title=chapter_title,
+                                paragraph_idx=paragraph_idx,
+                                char_start=start,
+                                char_end=end,
+                                original=orig,
+                                replacement=rep,
+                                category=cat,
+                                reason=reason,
+                                source="rule",
+                                status="applied",
+                            )
                         )
-                    )
 
-        # --- D. PHÁT HIỆN CÂU TRÙNG NGUYÊN VĂN ---
+        # --- D. PHÁT HIỆN CÂU TRÙNG NGUYÊN VĂN (MẶC ĐỊNH CHỜ DUYỆT - PENDING) ---
         sentences = re.split(r"(?<=[.!?])\s+", norm_para)
         if len(sentences) > 1:
             for i in range(len(sentences) - 1):
@@ -299,6 +375,8 @@ class VietnameseSpellChecker:
                                 start -= 1
                             issues.append(
                                 SpellIssue(
+                                    id=f"iss_c{chapter_num}_p{paragraph_idx}_{start}_{end}_dup",
+                                    original_hash=para_hash,
                                     chapter_num=chapter_num,
                                     chapter_title=chapter_title,
                                     paragraph_idx=paragraph_idx,
@@ -307,21 +385,20 @@ class VietnameseSpellChecker:
                                     original=norm_para[start:end],
                                     replacement="",
                                     category="lap_cau",
-                                    reason="Xóa câu trùng lặp nguyên văn liền kề",
+                                    reason="Đề xuất xóa câu trùng lặp nguyên văn liền kề (chờ duyệt)",
                                     source="rule",
-                                    status="applied",
+                                    status="pending",
                                 )
                             )
 
-        # Giải quyết chồng lấn
-        non_overlapping_issues = self._resolve_overlapping_issues(issues)
+        # Lọc bỏ các issue chồng lấn và các issue vô nghĩa (orig == rep)
+        valid_candidates = [
+            i for i in issues if i.original != i.replacement and i.char_start < i.char_end
+        ]
+        non_overlapping_issues = self._resolve_overlapping_issues(valid_candidates)
 
-        # Áp dụng
+        # Áp dụng các thay đổi đã được duyệt (status == 'applied')
         edited_para = self.apply_fixes(norm_para, non_overlapping_issues, approved_only=True)
-        # Làm sạch khoảng trắng thừa cuối cùng
-        edited_para = re.sub(r"\s+", " ", edited_para).strip()
-        edited_para = re.sub(r'\s+([.,!?:;])', r'\1', edited_para)
-        edited_para = re.sub(r'([.,!?:;])([a-zA-ZÀ-ỹ])', r'\1 \2', edited_para)
 
         return edited_para, non_overlapping_issues
 
@@ -346,7 +423,7 @@ class VietnameseSpellChecker:
 
     @staticmethod
     def _resolve_overlapping_issues(issues: List[SpellIssue]) -> List[SpellIssue]:
-        """Lọc bỏ các issue chồng lấn."""
+        """Lọc bỏ các issue chồng lấn một cách an toàn."""
         if not issues:
             return []
 
@@ -365,20 +442,33 @@ class VietnameseSpellChecker:
     def apply_fixes(
         original_text: str, issues: List[SpellIssue], approved_only: bool = True
     ) -> str:
-        """Áp dụng các thay đổi từ cuối lên đầu."""
+        """
+        Áp dụng các thay đổi từ cuối lên đầu để không làm lệch chỉ số ký tự.
+        Trước khi thay thế, kiểm tra lát cắt tại [char_start:char_end] phải khớp chính xác với issue.original.
+        Nếu không khớp hoặc chồng lấn, bỏ qua một cách an toàn.
+        """
         if not issues:
             return original_text
 
         valid_issues = [
             i for i in issues if (not approved_only or i.status == "applied")
         ]
-        valid_issues = sorted(valid_issues, key=lambda x: x.char_start, reverse=True)
+        # Sắp xếp từ cuối lên đầu
+        valid_issues = sorted(valid_issues, key=lambda x: (x.char_start, x.char_end), reverse=True)
 
         res = original_text
+        last_applied_start = len(res) + 1
+
         for issue in valid_issues:
             start = issue.char_start
             end = issue.char_end
             if 0 <= start <= end <= len(res):
+                if end > last_applied_start:
+                    continue
+                actual = res[start:end]
+                if actual != issue.original:
+                    continue
                 res = res[:start] + issue.replacement + res[end:]
+                last_applied_start = start
 
-        return res.strip()
+        return res

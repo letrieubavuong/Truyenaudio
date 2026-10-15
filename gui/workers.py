@@ -1,6 +1,9 @@
 """
-Background worker threads for PySide6 GUI to prevent UI freezing.
-Supports crawling, offline importing, spellchecking, and merging with pause/resume/stop.
+Background worker threads for PySide6 GUI.
+Strictly separates workflow into discrete non-blocking phases:
+1. CrawlWorker: Fetches or imports chapters into SQLite.
+2. SpellCheckWorker: Analyzes text, runs rules & AI, generates proposals for review.
+3. ExportWorker: Applies finalized user review decisions, merges volumes, and exports files.
 """
 from typing import List, Dict, Any, Optional
 from PySide6.QtCore import QThread, Signal
@@ -57,6 +60,7 @@ class CrawlWorker(QThread):
                 self.log_message.emit("INFO", f"Đang nạp các tệp offline từ: {self.import_dir}")
                 chapters = self.importer.import_directory(
                     directory_path=self.import_dir,
+                    story_url=self.story_url or "offline://local-story",
                     story_title="Phàm Nhân Tu Tiên",
                     on_progress=lambda c, t, m: self.progress_changed.emit(c, t, m),
                     on_log=lambda l, m: self.log_message.emit(l, m),
@@ -80,11 +84,11 @@ class CrawlWorker(QThread):
             self.finished_error.emit(str(e))
 
 
-class SpellCheckMergeWorker(QThread):
+class SpellCheckWorker(QThread):
     progress_changed = Signal(int, int, str)
     log_message = Signal(str, str)
-    issues_ready = Signal(object, object)  # (issues, edited_paragraphs_map)
-    finished_success = Signal(object)  # list of exported volume bundles
+    issues_ready = Signal(object, object, object, object)  # (issues, chapters, volumes, original_paras_map)
+    finished_analysis = Signal(int)
     finished_error = Signal(str)
 
     def __init__(
@@ -92,11 +96,11 @@ class SpellCheckMergeWorker(QThread):
         storage: StorageManager,
         checker: VietnameseSpellChecker,
         merger: VolumeMerger,
+        story_id: Optional[int],
         start_chap: int,
         end_chap: int,
         start_vol: int,
-        output_dir: str,
-        overwrite: bool = False,
+        do_spellcheck: bool = True,
         use_ai: bool = False,
         ai_checker: Optional[AIChecker] = None,
     ):
@@ -104,11 +108,11 @@ class SpellCheckMergeWorker(QThread):
         self.storage = storage
         self.checker = checker
         self.merger = merger
+        self.story_id = story_id
         self.start_chap = start_chap
         self.end_chap = end_chap
         self.start_vol = start_vol
-        self.output_dir = output_dir
-        self.overwrite = overwrite
+        self.do_spellcheck = do_spellcheck
         self.use_ai = use_ai
         self.ai_checker = ai_checker
         self._is_stopped = False
@@ -119,51 +123,73 @@ class SpellCheckMergeWorker(QThread):
     def run(self):
         try:
             self.log_message.emit("INFO", f"Đang truy vấn các chương từ {self.start_chap} đến {self.end_chap}...")
-            chapters = self.storage.get_chapters_range(story_id=1, start_chap=self.start_chap, end_chap=self.end_chap)
+            chapters = self.storage.get_chapters_range(
+                story_id=self.story_id, start_chap=self.start_chap, end_chap=self.end_chap
+            )
 
             if not chapters:
-                self.finished_error.emit(f"Không tìm thấy chương nào trong khoảng {self.start_chap} - {self.end_chap} trong CSDL.")
+                self.finished_error.emit(
+                    f"Không tìm thấy chương nào trong khoảng {self.start_chap} - {self.end_chap} trong CSDL."
+                )
                 return
 
             total_chaps = len(chapters)
-            self.log_message.emit("INFO", f"Tìm thấy {total_chaps} chương. Bắt đầu kiểm tra và sửa lỗi chính tả...")
+            self.log_message.emit("INFO", f"Tìm thấy {total_chaps} chương. Đang phân tích nội dung...")
 
             all_issues: List[SpellIssue] = []
-            edited_paragraphs_map: Dict[int, List[str]] = {}
+            original_paragraphs_map: Dict[int, List[str]] = {}
+
+            # Tải quyết định duyệt đã lưu trước đó nếu có
+            saved_decisions = self.storage.get_review_decisions(self.story_id)
 
             for idx, ch in enumerate(chapters, 1):
                 if self._is_stopped:
-                    self.log_message.emit("WARNING", "Tác vụ đã bị hủy.")
+                    self.log_message.emit("WARNING", "Tác vụ phân tích đã bị hủy.")
                     return
 
-                # 1. Kiểm tra theo quy tắc
-                edited_paras, issues = self.checker.check_chapter(
-                    ch.paragraphs, chapter_num=ch.chapter_num, chapter_title=ch.chapter_title
-                )
+                original_paragraphs_map[ch.chapter_num] = ch.paragraphs
 
-                # 2. Kiểm tra AI tùy chọn nếu được kích hoạt
-                if self.use_ai and self.ai_checker and self.ai_checker.api_key:
-                    chunks = self.ai_checker.prepare_chunks(edited_paras)
-                    for chunk in chunks:
-                        ai_issues, err = self.ai_checker.check_chunk(
-                            chunk, chapter_num=ch.chapter_num, chapter_title=ch.chapter_title
-                        )
-                        if err:
-                            self.log_message.emit("WARNING", f"Lỗi AI tại Chương {ch.chapter_num}: {err}")
-                        else:
-                            issues.extend(ai_issues)
+                if self.do_spellcheck:
+                    # 1. Kiểm tra quy tắc & từ điển
+                    _, rule_issues = self.checker.check_paragraph.__qualname__, []
+                    _, rule_issues = self.checker.check_chapter(
+                        ch.paragraphs, chapter_num=ch.chapter_num, chapter_title=ch.chapter_title
+                    )
 
-                edited_paragraphs_map[ch.chapter_num] = edited_paras
-                all_issues.extend(issues)
+                    # 2. Kiểm tra AI tùy chọn
+                    ai_issues: List[SpellIssue] = []
+                    if self.use_ai and self.ai_checker and self.ai_checker.api_key:
+                        self.log_message.emit("INFO", f"Chương {ch.chapter_num}: Đang phân tích qua AI...")
+                        chunks = self.ai_checker.prepare_chunks(ch.paragraphs)
+                        for chunk in chunks:
+                            if self._is_stopped:
+                                return
+                            chunk_issues, err = self.ai_checker.check_chunk(
+                                chunk, chapter_num=ch.chapter_num, chapter_title=ch.chapter_title
+                            )
+                            if err:
+                                self.log_message.emit("WARNING", f"AI tại Chương {ch.chapter_num}: {err}")
+                            else:
+                                ai_issues.extend(chunk_issues)
 
-                self.progress_changed.emit(idx, total_chaps, f"Đã kiểm tra Chương {ch.chapter_num}")
-                self.log_message.emit("SUCCESS", f"Chương {ch.chapter_num}: Phát hiện {len(issues)} vị trí cần xử lý.")
+                    chap_issues = rule_issues + ai_issues
 
-            # Phát tín hiệu để UI hiển thị màn hình xem trước và danh sách duyệt
-            self.issues_ready.emit(all_issues, edited_paragraphs_map)
+                    # Khôi phục trạng thái đã duyệt trước đó nếu có trong CSDL
+                    for iss in chap_issues:
+                        if iss.id in saved_decisions:
+                            iss.status = saved_decisions[iss.id]
 
-            # 3. Gộp tập và xuất file
-            self.log_message.emit("INFO", f"Bắt đầu gộp tập (mỗi {self.merger.chapters_per_volume} chương, tập bắt đầu {self.start_vol})...")
+                    all_issues.extend(chap_issues)
+                    self.log_message.emit(
+                        "INFO",
+                        f"Chương {ch.chapter_num}: {len(rule_issues)} đề xuất quy tắc, {len(ai_issues)} đề xuất AI."
+                    )
+                else:
+                    self.log_message.emit("INFO", f"Chương {ch.chapter_num}: Bỏ qua kiểm tra chính tả (đã tắt).")
+
+                self.progress_changed.emit(idx, total_chaps, f"Đã phân tích Chương {ch.chapter_num}")
+
+            # Xây dựng các tập Volume
             volumes = self.merger.build_volumes(
                 chapters=chapters,
                 start_volume_num=self.start_vol,
@@ -172,25 +198,68 @@ class SpellCheckMergeWorker(QThread):
                 story_title="Phàm Nhân Tu Tiên",
             )
 
+            # Phát tín hiệu sẵn sàng để người dùng xem trước và duyệt trên giao diện
+            self.issues_ready.emit(all_issues, chapters, volumes, original_paragraphs_map)
+            self.finished_analysis.emit(len(all_issues))
+
+        except Exception as e:
+            self.finished_error.emit(str(e))
+
+
+class ExportWorker(QThread):
+    progress_changed = Signal(int, int, str)
+    log_message = Signal(str, str)
+    finished_success = Signal(object)
+    finished_error = Signal(str)
+
+    def __init__(
+        self,
+        volumes: List[Volume],
+        issues: List[SpellIssue],
+        edited_paragraphs_map: Dict[int, List[str]],
+        output_dir: str,
+        merger: VolumeMerger,
+        overwrite: bool = False,
+    ):
+        super().__init__()
+        self.volumes = volumes
+        self.issues = issues
+        self.edited_paragraphs_map = edited_paragraphs_map
+        self.output_dir = output_dir
+        self.merger = merger
+        self.overwrite = overwrite
+        self._is_stopped = False
+
+    def stop(self):
+        self._is_stopped = True
+
+    def run(self):
+        try:
+            total_vols = len(self.volumes)
             exported_bundles = []
-            for vol in volumes:
+
+            for idx, vol in enumerate(self.volumes, 1):
                 if self._is_stopped:
-                    break
+                    self.log_message.emit("WARNING", "Tác vụ xuất tập đã bị hủy.")
+                    return
+
                 vol_issues = [
-                    i for i in all_issues if i.chapter_num and vol.start_chapter <= i.chapter_num <= vol.end_chapter
+                    i for i in self.issues
+                    if i.chapter_num is not None and vol.start_chapter <= i.chapter_num <= vol.end_chapter
                 ]
+
                 bundle = ReportGenerator.export_volume_bundle(
                     volume=vol,
                     output_dir=self.output_dir,
                     merger=self.merger,
                     issues=vol_issues,
-                    edited_paragraphs_map=edited_paragraphs_map,
+                    edited_paragraphs_map=self.edited_paragraphs_map,
                     overwrite=self.overwrite,
                 )
                 exported_bundles.append(bundle)
-                self.log_message.emit("SUCCESS", f"Đã xuất thành công Tập {vol.volume_num} vào {self.output_dir}")
+                self.progress_changed.emit(idx, total_vols, f"Đã xuất Tập {vol.volume_num}")
+                self.log_message.emit("SUCCESS", f"Đã xuất an toàn Tập {vol.volume_num} vào {self.output_dir}")
 
             self.finished_success.emit(exported_bundles)
-
         except Exception as e:
             self.finished_error.emit(str(e))

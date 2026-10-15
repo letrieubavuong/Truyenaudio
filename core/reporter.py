@@ -3,8 +3,9 @@ Report and Audit Log Generator.
 Generates for each volume:
 1. RAW TXT: immutable original text
 2. EDITED TXT: text after approved/applied fixes
-3. Markdown Report: full statistics by 5 categories, counts (applied, pending, rejected), detailed audit table
+3. Markdown Report: full statistics by categories, counts (applied, pending, rejected), detailed audit table with escaped special characters
 4. JSON Changelog: machine-readable audit trail
+Supports atomic writes via temporary files to prevent half-finished bundles.
 """
 import os
 import json
@@ -12,6 +13,14 @@ from datetime import datetime
 from typing import List, Dict, Any, Tuple
 from core.models import Volume, SpellIssue
 from core.merger import VolumeMerger
+
+
+def escape_md(text: str) -> str:
+    """Thoát các ký tự đặc biệt để không làm vỡ bảng Markdown."""
+    if not text:
+        return ""
+    text = str(text).replace("|", "\\|").replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+    return text
 
 
 class ReportGenerator:
@@ -28,28 +37,22 @@ class ReportGenerator:
     def calculate_statistics(cls, issues: List[SpellIssue]) -> Dict[str, Any]:
         """
         Tính toán thống kê theo quy ước:
-        - Một thay đổi liên tục, không chồng lấn = 1 vị trí.
-        - Lỗi xuất hiện ở nhiều nơi tính riêng.
-        - Phân biệt: Tổng đề xuất, Số đã áp dụng, Số chưa xử lý (pending), Số từ chối (rejected).
-        - Phân tách theo 5 nhóm lỗi chính.
+        - Tổng số đề xuất = applied + pending + rejected.
+        - Số đã áp dụng chỉ tính các thay đổi thực sự có trạng thái 'applied'.
         """
+        applied_count = sum(1 for i in issues if i.status == "applied")
+        pending_count = sum(1 for i in issues if i.status == "pending")
+        rejected_count = sum(1 for i in issues if i.status == "rejected")
+
         stats = {
             "total_suggestions": len(issues),
-            "applied": sum(1 for i in issues if i.status == "applied"),
-            "pending": sum(1 for i in issues if i.status == "pending"),
-            "rejected": sum(1 for i in issues if i.status == "rejected"),
+            "applied": applied_count,
+            "pending": pending_count,
+            "rejected": rejected_count,
             "by_category": {},
         }
 
-        # Khởi tạo các nhóm
-        for cat_key in [
-            "chinh_ta",
-            "dau_cau",
-            "khoang_trang",
-            "gach_duoi_thua",
-            "lap_cau",
-            "ten_rieng",
-        ]:
+        for cat_key in cls.CATEGORY_LABELS.keys():
             stats["by_category"][cat_key] = {
                 "total": 0,
                 "applied": 0,
@@ -76,13 +79,13 @@ class ReportGenerator:
         issues: List[SpellIssue],
         stats: Dict[str, Any],
     ) -> str:
-        """Tạo báo cáo chi tiết bằng định dạng Markdown."""
+        """Tạo báo cáo chi tiết bằng định dạng Markdown với ký tự đặc biệt được escape an toàn."""
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         status_note = "HOÀN CHỈNH" if not volume.is_draft else f"BẢN NHÁP (THIẾU CHƯƠNG: {volume.missing_chapters})"
 
         md = []
-        md.append(f"# BÁO CÁO HIỆU ĐÍNH VÀ KIỂM TRA CHÍNH TẢ")
-        md.append(f"**Tác phẩm:** {volume.story_title or 'Phàm Nhân Tu Tiên'}")
+        md.append("# BÁO CÁO HIỆU ĐÍNH VÀ KIỂM TRA CHÍNH TẢ")
+        md.append(f"**Tác phẩm:** {escape_md(volume.story_title or 'Phàm Nhân Tu Tiên')}")
         md.append(f"**Tập:** {volume.volume_num} (Chương {volume.start_chapter} đến Chương {volume.end_chapter})")
         md.append(f"**Thời gian xuất:** {now_str}")
         md.append(f"**Trạng thái tập:** {status_note}")
@@ -113,14 +116,15 @@ class ReportGenerator:
 
             for idx, iss in enumerate(issues, 1):
                 chap_name = f"Chương {iss.chapter_num}" if iss.chapter_num else "Chương ?"
-                orig_disp = repr(iss.original)[1:-1] if iss.original else "(rỗng)"
-                rep_disp = repr(iss.replacement)[1:-1] if iss.replacement else "(xóa)"
+                orig_disp = escape_md(repr(iss.original)[1:-1]) if iss.original else "(rỗng)"
+                rep_disp = escape_md(repr(iss.replacement)[1:-1]) if iss.replacement else "(xóa)"
                 cat_label = cls.CATEGORY_LABELS.get(iss.category, iss.category)
+                reason_disp = escape_md(iss.reason)
                 status_badge = "Đã áp dụng" if iss.status == "applied" else ("Chờ duyệt" if iss.status == "pending" else "Từ chối")
 
                 md.append(
                     f"| {idx} | {chap_name} | Đoạn {iss.paragraph_idx} | {iss.char_start}-{iss.char_end} | "
-                    f"`{orig_disp}` | `{rep_disp}` | {cat_label} | {iss.reason} | {iss.source} | {status_badge} |"
+                    f"`{orig_disp}` | `{rep_disp}` | {cat_label} | {reason_disp} | {iss.source} | {status_badge} |"
                 )
 
         md.append("\n---\n")
@@ -139,12 +143,11 @@ class ReportGenerator:
         overwrite: bool = False,
     ) -> Dict[str, str]:
         """
-        Xuất toàn bộ 4 tệp cho tập vào thư mục output_dir:
+        Xuất toàn bộ 4 tệp cho tập vào thư mục output_dir thông qua file tạm an toàn:
         1. RAW TXT
         2. EDITED TXT
         3. REPORT MD
         4. CHANGELOG JSON
-        Trả về dict {type: file_path}
         """
         os.makedirs(output_dir, exist_ok=True)
         base_name = volume.filename_base
@@ -154,49 +157,73 @@ class ReportGenerator:
         report_path = os.path.join(output_dir, f"{base_name}_REPORT.md")
         json_path = os.path.join(output_dir, f"{base_name}_CHANGELOG.json")
 
-        # Kiểm tra ghi đè an toàn
+        # Kiểm tra ghi đè trước khi thực hiện
         for p in [raw_path, edited_path, report_path, json_path]:
             if os.path.exists(p) and not overwrite:
                 raise FileExistsError(
                     f"Tệp '{os.path.basename(p)}' đã tồn tại. Vui lòng bật cờ 'Ghi đè' (overwrite) nếu muốn ghi đè."
                 )
 
-        # 1. Render RAW TXT (UTF-8)
-        raw_text = merger.render_volume_text(volume, use_edited=False)
-        with open(raw_path, "w", encoding="utf-8", newline="") as f:
-            f.write(raw_text)
+        # Đường dẫn file tạm thời (.tmp)
+        raw_tmp = raw_path + ".tmp"
+        edited_tmp = edited_path + ".tmp"
+        report_tmp = report_path + ".tmp"
+        json_tmp = json_path + ".tmp"
+        temp_files = [raw_tmp, edited_tmp, report_tmp, json_tmp]
 
-        # 2. Render EDITED TXT (UTF-8)
-        edited_text = merger.render_volume_text(
-            volume, use_edited=True, chapter_paragraphs_map=edited_paragraphs_map
-        )
-        with open(edited_path, "w", encoding="utf-8", newline="") as f:
-            f.write(edited_text)
+        try:
+            # 1. Render RAW TXT (UTF-8, LF)
+            raw_text = merger.render_volume_text(volume, use_edited=False)
+            with open(raw_tmp, "w", encoding="utf-8", newline="\n") as f:
+                f.write(raw_text)
 
-        # 3. Tính toán thống kê & xuất Báo cáo Markdown
-        stats = cls.calculate_statistics(issues)
-        report_md = cls.generate_markdown_report(volume, issues, stats)
-        with open(report_path, "w", encoding="utf-8") as f:
-            f.write(report_md)
+            # 2. Render EDITED TXT (UTF-8, LF)
+            edited_text = merger.render_volume_text(
+                volume, use_edited=True, chapter_paragraphs_map=edited_paragraphs_map
+            )
+            with open(edited_tmp, "w", encoding="utf-8", newline="\n") as f:
+                f.write(edited_text)
 
-        # 4. Xuất JSON Changelog
-        audit_data = {
-            "volume_num": volume.volume_num,
-            "story_title": volume.story_title,
-            "start_chapter": volume.start_chapter,
-            "end_chapter": volume.end_chapter,
-            "is_draft": volume.is_draft,
-            "missing_chapters": volume.missing_chapters,
-            "created_at": datetime.now().isoformat(),
-            "statistics": stats,
-            "issues": [i.to_dict() for i in issues],
-        }
-        with open(json_path, "w", encoding="utf-8") as f:
-            json.dump(audit_data, f, ensure_ascii=False, indent=2)
+            # 3. Tính toán thống kê & xuất Báo cáo Markdown
+            stats = cls.calculate_statistics(issues)
+            report_md = cls.generate_markdown_report(volume, issues, stats)
+            with open(report_tmp, "w", encoding="utf-8", newline="\n") as f:
+                f.write(report_md)
 
-        return {
-            "raw": raw_path,
-            "edited": edited_path,
-            "report": report_path,
-            "changelog": json_path,
-        }
+            # 4. Xuất JSON Changelog
+            audit_data = {
+                "volume_num": volume.volume_num,
+                "story_title": volume.story_title,
+                "start_chapter": volume.start_chapter,
+                "end_chapter": volume.end_chapter,
+                "is_draft": volume.is_draft,
+                "missing_chapters": volume.missing_chapters,
+                "created_at": datetime.now().isoformat(),
+                "statistics": stats,
+                "issues": [i.to_dict() for i in issues],
+            }
+            with open(json_tmp, "w", encoding="utf-8") as f:
+                json.dump(audit_data, f, ensure_ascii=False, indent=2)
+
+            # Hoàn tất an toàn: hoán đổi nguyên tử các file tạm thành file chính thức
+            os.replace(raw_tmp, raw_path)
+            os.replace(edited_tmp, edited_path)
+            os.replace(report_tmp, report_path)
+            os.replace(json_tmp, json_path)
+
+            return {
+                "raw": raw_path,
+                "edited": edited_path,
+                "report": report_path,
+                "changelog": json_path,
+            }
+
+        except Exception as e:
+            # Dọn dẹp file tạm nếu xảy ra lỗi giữa chừng
+            for tmp in temp_files:
+                if os.path.exists(tmp):
+                    try:
+                        os.remove(tmp)
+                    except Exception:
+                        pass
+            raise e

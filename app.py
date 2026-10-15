@@ -26,6 +26,12 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("PNTT Truyen Manager")
 
+    # Đảm bảo font point size dương để tránh cảnh báo QFont trên Windows
+    default_font = app.font()
+    if default_font.pointSize() <= 0:
+        default_font.setPointSize(9)
+        app.setFont(default_font)
+
     # Nạp stylesheet nền sáng hiện đại
     qss_path = os.path.join(os.path.dirname(__file__), "resources", "styles.qss")
     if os.path.exists(qss_path):
