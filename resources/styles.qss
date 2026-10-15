@@ -1,0 +1,152 @@
+/* Clean Light Theme for PySide6 Desktop Application */
+QWidget {
+    background-color: #f8f9fa;
+    color: #212529;
+    font-family: "Segoe UI", Arial, sans-serif;
+    font-size: 13px;
+}
+
+QMainWindow {
+    background-color: #f4f6f9;
+}
+
+QGroupBox {
+    font-weight: bold;
+    border: 1px solid #ced4da;
+    border-radius: 6px;
+    margin-top: 10px;
+    padding-top: 15px;
+    background-color: #ffffff;
+}
+
+QGroupBox::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: 12px;
+    padding: 0 5px;
+    color: #1a73e8;
+}
+
+QLineEdit, QComboBox, QSpinBox {
+    background-color: #ffffff;
+    border: 1px solid #ced4da;
+    border-radius: 4px;
+    padding: 5px 8px;
+    color: #212529;
+}
+
+QLineEdit:focus, QComboBox:focus, QSpinBox:focus {
+    border: 1px solid #1a73e8;
+    background-color: #ffffff;
+}
+
+QPushButton {
+    background-color: #e9ecef;
+    border: 1px solid #ced4da;
+    border-radius: 4px;
+    padding: 6px 14px;
+    font-weight: 500;
+    color: #343a40;
+}
+
+QPushButton:hover {
+    background-color: #dee2e6;
+    border-color: #adb5bd;
+}
+
+QPushButton:pressed {
+    background-color: #ced4da;
+}
+
+QPushButton#btn_start {
+    background-color: #2e7d32;
+    color: white;
+    font-weight: bold;
+    border: none;
+}
+
+QPushButton#btn_start:hover {
+    background-color: #1b5e20;
+}
+
+QPushButton#btn_pause {
+    background-color: #f57c00;
+    color: white;
+    font-weight: bold;
+    border: none;
+}
+
+QPushButton#btn_pause:hover {
+    background-color: #e65100;
+}
+
+QPushButton#btn_stop {
+    background-color: #c62828;
+    color: white;
+    font-weight: bold;
+    border: none;
+}
+
+QPushButton#btn_stop:hover {
+    background-color: #b71c1c;
+}
+
+QTableWidget {
+    background-color: #ffffff;
+    border: 1px solid #dee2e6;
+    border-radius: 4px;
+    gridline-color: #e9ecef;
+}
+
+QHeaderView::section {
+    background-color: #e9ecef;
+    color: #495057;
+    font-weight: bold;
+    border: 1px solid #dee2e6;
+    padding: 6px;
+}
+
+QTabWidget::pane {
+    border: 1px solid #ced4da;
+    border-radius: 4px;
+    background-color: #ffffff;
+    top: -1px;
+}
+
+QTabBar::tab {
+    background: #e9ecef;
+    border: 1px solid #ced4da;
+    padding: 8px 16px;
+    margin-right: 2px;
+    border-top-left-radius: 4px;
+    border-top-right-radius: 4px;
+    color: #495057;
+}
+
+QTabBar::tab:selected {
+    background: #ffffff;
+    border-bottom-color: #ffffff;
+    font-weight: bold;
+    color: #1a73e8;
+}
+
+QProgressBar {
+    border: 1px solid #ced4da;
+    border-radius: 4px;
+    text-align: center;
+    background-color: #e9ecef;
+    height: 18px;
+    font-weight: bold;
+}
+
+QProgressBar::chunk {
+    background-color: #1a73e8;
+    border-radius: 3px;
+}
+
+QTextEdit {
+    background-color: #ffffff;
+    border: 1px solid #ced4da;
+    border-radius: 4px;
+    padding: 6px;
+}

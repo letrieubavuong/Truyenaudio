@@ -1,0 +1,48 @@
+{
+  "description": "Từ điển sửa lỗi chính tả tiếng Việt có thể chỉnh sửa",
+  "version": "1.0",
+  "replacements": {
+    "ban đâu": "ban đầu",
+    "nguời": "người",
+    "nguơi": "ngươi",
+    "đưa trẻ": "đứa trẻ",
+    "mầu mỡ": "màu mỡ",
+    "thương xuyên": "thường xuyên",
+    "sãn": "sẵn",
+    "qui định": "quy định",
+    "quí khách": "quý khách",
+    "chưởng quĩ": "chưởng quỹ",
+    "dơ cánh tay": "giơ cánh tay",
+    "dơ tay": "giơ tay",
+    "dơ lên": "giơ lên",
+    "sáng lạng": "xán lạn",
+    "sơ xuất": "sơ suất",
+    "xuống giòng": "xuống dòng",
+    "chần chừ": "chần chừ",
+    "chần chờ": "chần chờ",
+    "giấu giếm": "giấu giếm",
+    "bổ xung": "bổ sung",
+    "chắp bút": "chấp bút",
+    "suôn sẻ": "suôn sẻ",
+    "sát nhập": "sáp nhập",
+    "bàng quan": "bàng quan",
+    "vô hình chung": "vô hình trung",
+    "chuẩn hoá": "chuẩn hóa",
+    "bão hoà": "bão hòa",
+    "hoả tiễn": "hỏa tiễn"
+  },
+  "context_rules": [
+    {
+      "pattern": "\\b(càng|đang|tiếp tục|hướng đỉnh|hướng tới)\\s+treo\\s+(lên|tới|cao)\\b",
+      "replacement": "\\1 trèo \\2",
+      "reason": "Sửa nhầm lẫn giữa 'treo' và 'trèo' trong ngữ cảnh leo trèo",
+      "category": "chinh_ta"
+    },
+    {
+      "pattern": "\\btreo\\s+lên\\s+tới\\s+đỉnh\\b",
+      "replacement": "trèo lên tới đỉnh",
+      "reason": "Sửa nhầm lẫn 'treo lên' thành 'trèo lên'",
+      "category": "chinh_ta"
+    }
+  ]
+}

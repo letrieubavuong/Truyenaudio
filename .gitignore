@@ -1,0 +1,59 @@
+# Python & Môi trường ảo
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Database tiến độ & Cache
+*.db
+*.sqlite
+*.sqlite3
+crawler_state.db
+tests/test_workspace/
+.pytest_cache/
+
+# Dữ liệu xuất và tải về
+output_*/
+output_volumes/
+output_cli_test/
+exports/
+data/downloads/
+data/crawled/
+data/temp/
+
+# Môi trường, API Keys & Bí mật
+.env
+.env.*
+*.key
+*.pem
+token.json
+credentials.json
+*.token
+
+# IDE & OS
+.vscode/
+.idea/
+*.swp
+*.swo
+Thumbs.db
+Desktop.ini
