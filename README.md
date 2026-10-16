@@ -125,33 +125,34 @@ python cli.py merge --start-chap 1 --end-chap 4 --start-vol 268 --per-vol 4 --ou
 
 ## 5. QUY ƯỚC ĐẾM VÀ ĐỊNH DẠNG XUẤT AUDIO
 
-Mỗi tập được xuất thành 4 tệp đồng bộ:
-1. `Tap_{vol}_Chuong_{start}_den_{end}_RAW.txt`: Bản gốc bất biến định dạng đọc audio chuẩn:
-   - **Phần mở đầu tiêu chuẩn:**
-     ```
-     PHÀM NHÂN TU TIÊN - TẬP {so_tap}
-     Chào mừng các bạn đang theo dõi bộ truyện tiên hiệp Phàm Nhân Tu Tiên, tác giả Vong Ngữ.
-     Đây là Tập {so_tap}, phát từ Chương {chuong_dau} đến Chương {chuong_cuoi}.
-     Chúc các bạn có những giây phút thư giãn và trải nghiệm tuyệt vời.
-     ```
-   - Không xuất tiêu đề từng chương, không xuất nhãn đánh số chương và đường phân cách.
-   - Các chương nối tiếp nhau bằng một dòng trống.
-   - **Kết thúc tập bằng đúng một dòng:**
-     ```
-     Hết Tập {so_tap}: Cảm ơn quý thính giả đã chú ý lắng nghe. Hẹn gặp lại các bạn trong Tập {so_tap_tiep_theo} tiếp theo!
-     ```
-   - **Chuẩn hóa xuống dòng:** Văn bản được ghi bằng mã hóa UTF-8 với kiểu xuống dòng LF (`\n`) sau khi áp dụng quy tắc chuẩn hóa khoảng trắng cuối dòng: chuyển đổi `\r\n` / `\r` thành `\n`, sau đó áp dụng regex `\s\n` → `\n` đúng một lượt.
-2. `Tap_{vol}_Chuong_{start}_den_{end}_EDITED.txt`: Bản đã sửa lỗi sau khi duyệt/áp dụng theo cùng định dạng đọc audio. Bản này tái tạo chính xác 100% từ bản gốc và nhật ký thay đổi.
-3. `Tap_{vol}_Chuong_{start}_den_{end}_REPORT.md`: Báo cáo chi tiết:
-   - Thống kê: Tổng số đề xuất, Số đã áp dụng, Số chờ duyệt (pending), Số từ chối (rejected).
-   - Phân loại theo các nhóm lỗi (Chính tả, Dấu câu, Khoảng trắng, Gạch dưới thừa, Lặp câu, Tên riêng).
-   - Bảng kê chi tiết từng vị trí ký tự, nội dung gốc, nội dung sửa, lý do, nguồn và trạng thái (ký tự đặc biệt như `|` được escape an toàn).
-4. `Tap_{vol}_Chuong_{start}_den_{end}_CHANGELOG.json`: Nhật ký kiểm tra (audit log) máy đọc được.
+Định dạng xuất file audio:
+- **Mặc định:** Chỉ xuất duy nhất 1 file TXT hoàn chỉnh: `Tap_{vol}_Chuong_{start}_den_{end}.txt` (không sinh thêm các file rác `.md` hay `.json`).
+- **Tùy chọn Audit (`--export-reports` trên CLI hoặc checkbox trên GUI):** Khi cần đối chiếu, có thể xuất thêm bộ 4 tệp:
+  1. `Tap_{vol}_Chuong_{start}_den_{end}_RAW.txt`: Bản gốc bất biến.
+  2. `Tap_{vol}_Chuong_{start}_den_{end}_EDITED.txt`: Bản đã sửa lỗi sau khi duyệt/áp dụng.
+  3. `Tap_{vol}_Chuong_{start}_den_{end}_REPORT.md`: Báo cáo chi tiết thống kê và bảng kê các lỗi.
+  4. `Tap_{vol}_Chuong_{start}_den_{end}_CHANGELOG.json`: Nhật ký kiểm tra (audit log) máy đọc được.
+
+**Quy chuẩn nội dung file TXT:**
+- **Phần mở đầu tiêu chuẩn:**
+  ```
+  PHÀM NHÂN TU TIÊN - TẬP {so_tap}
+  Chào mừng các bạn đang theo dõi bộ truyện tiên hiệp Phàm Nhân Tu Tiên, tác giả Vong Ngữ.
+  Đây là Tập {so_tap}, phát từ Chương {chuong_dau} đến Chương {chuong_cuoi}.
+  Chúc các bạn có những giây phút thư giãn và trải nghiệm tuyệt vời.
+  ```
+- Không xuất tiêu đề từng chương, không xuất nhãn đánh số chương và đường phân cách.
+- Các chương nối tiếp nhau bằng một dòng trống.
+- **Kết thúc tập bằng đúng một dòng:**
+  ```
+  Hết Tập {so_tap}: Cảm ơn quý thính giả đã chú ý lắng nghe. Hẹn gặp lại các bạn trong Tập {so_tap_tiep_theo} tiếp theo!
+  ```
+- **Chuẩn hóa xuống dòng:** Văn bản được ghi bằng mã hóa UTF-8 với kiểu xuống dòng LF (`\n`) sau khi áp dụng quy tắc chuẩn hóa khoảng trắng cuối dòng: chuyển đổi `\r\n` / `\r` thành `\n`, sau đó áp dụng regex `\s\n` → `\n` đúng một lượt.
 
 **Quy tắc an toàn dữ liệu:**
 - **Bất biến:** Nội dung raw đã nạp vào CSDL không bị ghi đè khi cùng URL trả về nội dung khác; phiên bản mới được lưu vào `chapter_versions`.
 - **Ghi đè:** Không ghi đè tệp xuất nếu chưa bật cờ overwrite. Quá trình xuất sử dụng file tạm `.tmp` trước khi atomic replace.
-- **Tập nháp (DRAFT):** Nếu thiếu một chương hoặc có lỗi tải, tập được đánh dấu là `is_draft = True`, xuất file có hậu tố `_DRAFT_...` kèm cảnh báo danh sách chương thiếu, không xuất như tập hoàn chỉnh.
+- **Tập nháp (DRAFT):** Nếu thiếu một chương hoặc có lỗi tải, tập được đánh dấu là `is_draft = True`, xuất file có hậu tố `_DRAFT.txt` kèm cảnh báo danh sách chương thiếu, không xuất như tập hoàn chỉnh.
 - **Nhóm cuối:** Nhóm cuối dưới 4 chương chỉ xuất khi bật cờ `allow_partial_last_volume`.
 
 ---

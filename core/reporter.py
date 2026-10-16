@@ -184,17 +184,50 @@ class ReportGenerator:
         issues: List[SpellIssue],
         edited_paragraphs_map: Dict[int, List[str]],
         overwrite: bool = False,
+        export_reports: bool = False,
     ) -> Dict[str, str]:
         """
-        Xuất toàn bộ 4 tệp cho tập vào thư mục output_dir thông qua file tạm an toàn:
-        1. RAW TXT
-        2. EDITED TXT
-        3. REPORT MD
-        4. CHANGELOG JSON
+        Xuất tệp cho tập vào thư mục output_dir thông qua file tạm an toàn:
+        - Mặc định (export_reports=False): Chỉ xuất duy nhất 1 file TXT hoàn chỉnh: Tap_{vol}_Chuong_{start}_den_{end}.txt
+        - Nếu bật export_reports=True: Xuất trọn bộ 4 tệp (RAW TXT, EDITED TXT, REPORT MD, CHANGELOG JSON) để audit.
         """
         os.makedirs(output_dir, exist_ok=True)
         base_name = volume.filename_base
 
+        if not export_reports:
+            # CHỈ XUẤT DUY NHẤT 1 FILE TXT HOÀN CHỈNH (không tạo file rác .md, .json hay _RAW)
+            final_txt_path = os.path.join(output_dir, f"{base_name}.txt")
+            if os.path.exists(final_txt_path) and not overwrite:
+                raise FileExistsError(
+                    f"Tệp '{os.path.basename(final_txt_path)}' đã tồn tại. Vui lòng bật cờ 'Ghi đè' (overwrite) nếu muốn ghi đè."
+                )
+
+            final_tmp = final_txt_path + ".tmp"
+            try:
+                # Render bản TXT hoàn chỉnh (áp dụng các đoạn đã hiệu đính nếu có)
+                final_text = merger.render_volume_text(
+                    volume, use_edited=True, chapter_paragraphs_map=edited_paragraphs_map
+                )
+                with open(final_tmp, "w", encoding="utf-8", newline="\n") as f:
+                    f.write(final_text)
+
+                os.replace(final_tmp, final_txt_path)
+                return {
+                    "txt": final_txt_path,
+                    "edited": final_txt_path,
+                    "raw": final_txt_path,
+                    "report": "",
+                    "changelog": "",
+                }
+            except Exception as e:
+                if os.path.exists(final_tmp):
+                    try:
+                        os.remove(final_tmp)
+                    except Exception:
+                        pass
+                raise e
+
+        # Nếu bật export_reports=True: xuất trọn bộ 4 tệp phục vụ audit
         raw_path = os.path.join(output_dir, f"{base_name}_RAW.txt")
         edited_path = os.path.join(output_dir, f"{base_name}_EDITED.txt")
         report_path = os.path.join(output_dir, f"{base_name}_REPORT.md")
@@ -255,6 +288,7 @@ class ReportGenerator:
             os.replace(json_tmp, json_path)
 
             return {
+                "txt": edited_path,
                 "raw": raw_path,
                 "edited": edited_path,
                 "report": report_path,

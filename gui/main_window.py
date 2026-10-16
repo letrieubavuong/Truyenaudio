@@ -134,6 +134,9 @@ class MainWindow(QMainWindow):
         self.chk_overwrite.setChecked(False)
         self.chk_allow_partial = QCheckBox("Xuất nhóm cuối (< 4 chương)")
         self.chk_allow_partial.setChecked(False)
+        self.chk_export_reports = QCheckBox("Xuất kèm báo cáo (.md, .json)")
+        self.chk_export_reports.setChecked(False)
+        self.chk_export_reports.setToolTip("Mặc định chỉ xuất duy nhất 1 file TXT hoàn chỉnh. Bật tùy chọn này nếu muốn tạo thêm file báo cáo .md và nhật ký .json.")
 
         chk_layout.addWidget(self.chk_download)
         chk_layout.addWidget(self.chk_spellcheck)
@@ -141,6 +144,7 @@ class MainWindow(QMainWindow):
         chk_layout.addWidget(self.chk_use_ai)
         chk_layout.addWidget(self.chk_overwrite)
         chk_layout.addWidget(self.chk_allow_partial)
+        chk_layout.addWidget(self.chk_export_reports)
         chk_layout.addStretch()
 
         cfg_layout.addLayout(chk_layout, 2, 0, 1, 8)
@@ -486,14 +490,16 @@ class MainWindow(QMainWindow):
         out_dir = self.txt_output_dir.text().strip()
 
         # Kiểm tra ghi đè an toàn trước khi chạy
+        export_reports = self.chk_export_reports.isChecked()
         if not self.chk_overwrite.isChecked():
             for vol in self.current_volumes:
-                raw_path = os.path.join(out_dir, f"{vol.filename_base}_RAW.txt")
-                if os.path.exists(raw_path):
+                target_fname = f"{vol.filename_base}_EDITED.txt" if export_reports else f"{vol.filename_base}.txt"
+                target_path = os.path.join(out_dir, target_fname)
+                if os.path.exists(target_path):
                     QMessageBox.warning(
                         self,
                         "Tệp đã tồn tại",
-                        f"Tệp '{os.path.basename(raw_path)}' đã tồn tại trong thư mục xuất.\n"
+                        f"Tệp '{target_fname}' đã tồn tại trong thư mục xuất.\n"
                         "Vui lòng bật cờ 'Ghi đè file nếu đã có' hoặc đổi thư mục xuất."
                     )
                     return
@@ -511,6 +517,7 @@ class MainWindow(QMainWindow):
             output_dir=out_dir,
             merger=self.current_merger,
             overwrite=self.chk_overwrite.isChecked(),
+            export_reports=export_reports,
         )
         self.export_worker.progress_changed.connect(self.on_progress)
         self.export_worker.log_message.connect(self.log)
@@ -522,7 +529,7 @@ class MainWindow(QMainWindow):
         self.log("SUCCESS", f"Hoàn tất xuất file! Đã xuất an toàn {len(bundles)} tập truyện.")
         self.prog_bar.setValue(100)
 
-        if bundles and "report" in bundles[0]:
+        if bundles and bundles[0].get("report"):
             try:
                 with open(bundles[0]["report"], "r", encoding="utf-8") as f:
                     self.txt_report_viewer.setPlainText(f.read())
@@ -572,3 +579,13 @@ class MainWindow(QMainWindow):
         self.btn_pause.setEnabled(False)
         self.btn_resume.setEnabled(False)
         self.btn_stop.setEnabled(False)
+
+    def closeEvent(self, event):
+        """Dọn dẹp an toàn các worker thread khi người dùng đóng cửa sổ."""
+        for worker in [self.crawl_worker, self.spell_worker, self.export_worker]:
+            if worker and worker.isRunning():
+                if hasattr(worker, "stop"):
+                    worker.stop()
+                worker.quit()
+                worker.wait(1000)
+        event.accept()

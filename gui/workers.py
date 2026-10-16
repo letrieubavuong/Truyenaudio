@@ -220,6 +220,7 @@ class ExportWorker(QThread):
         output_dir: str,
         merger: VolumeMerger,
         overwrite: bool = False,
+        export_reports: bool = False,
     ):
         super().__init__()
         self.volumes = volumes
@@ -228,6 +229,7 @@ class ExportWorker(QThread):
         self.output_dir = output_dir
         self.merger = merger
         self.overwrite = overwrite
+        self.export_reports = export_reports
         self._is_stopped = False
 
     def stop(self):
@@ -255,10 +257,12 @@ class ExportWorker(QThread):
                     issues=vol_issues,
                     edited_paragraphs_map=self.edited_paragraphs_map,
                     overwrite=self.overwrite,
+                    export_reports=self.export_reports,
                 )
                 exported_bundles.append(bundle)
+                out_name = os.path.basename(bundle.get("txt", f"Tập {vol.volume_num}"))
                 self.progress_changed.emit(idx, total_vols, f"Đã xuất Tập {vol.volume_num}")
-                self.log_message.emit("SUCCESS", f"Đã xuất an toàn Tập {vol.volume_num} vào {self.output_dir}")
+                self.log_message.emit("SUCCESS", f"Đã xuất Tập {vol.volume_num} thành công: {out_name}")
 
             self.finished_success.emit(exported_bundles)
         except Exception as e:

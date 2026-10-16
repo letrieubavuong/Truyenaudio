@@ -81,7 +81,7 @@ class TestEndToEndPipeline(unittest.TestCase):
         self.assertFalse(vol.is_draft)
         self.assertEqual(len(vol.chapters), 4)
 
-        # 5. Xuất trọn bộ 4 tệp bundle
+        # 5. Xuất trọn bộ 4 tệp bundle (kiểm tra audit)
         exported_files = ReportGenerator.export_volume_bundle(
             volume=vol,
             output_dir=self.output_dir,
@@ -89,6 +89,7 @@ class TestEndToEndPipeline(unittest.TestCase):
             issues=all_volume_issues,
             edited_paragraphs_map=edited_paragraphs_map,
             overwrite=True,
+            export_reports=True,
         )
 
         for key, fpath in exported_files.items():
@@ -130,6 +131,22 @@ class TestEndToEndPipeline(unittest.TestCase):
         self.assertEqual(changelog_data["volume_num"], 268)
         self.assertEqual(len(changelog_data["issues"]), len(all_volume_issues))
         self.assertIn("statistics", changelog_data)
+        # 8. Kiểm tra xuất chế độ mặc định txt_only (không tạo file md/json rác)
+        txt_out_dir = os.path.join(self.output_dir, "txt_only")
+        txt_bundle = ReportGenerator.export_volume_bundle(
+            volume=vol,
+            output_dir=txt_out_dir,
+            merger=merger,
+            issues=all_volume_issues,
+            edited_paragraphs_map=edited_paragraphs_map,
+            overwrite=True,
+            export_reports=False,
+        )
+        self.assertTrue(os.path.exists(txt_bundle["txt"]))
+        txt_files = os.listdir(txt_out_dir)
+        self.assertEqual(len(txt_files), 1)
+        self.assertEqual(txt_files[0], "Tap_268_Chuong_1_den_4.txt")
+
         print("[End-to-End Test] All assertions passed successfully!")
 
 

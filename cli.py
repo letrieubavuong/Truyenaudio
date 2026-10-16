@@ -164,12 +164,16 @@ def cmd_merge(args):
             issues=vol_issues,
             edited_paragraphs_map=edited_paragraphs_map,
             overwrite=args.overwrite,
+            export_reports=getattr(args, "export_reports", False),
         )
-        print(f"[✓] Đã xuất Tập {vol.volume_num}:")
-        print(f"    - RAW:       {bundle['raw']}")
-        print(f"    - EDITED:    {bundle['edited']}")
-        print(f"    - REPORT:    {bundle['report']}")
-        print(f"    - CHANGELOG: {bundle['changelog']}")
+        if getattr(args, "export_reports", False):
+            print(f"[✓] Đã xuất Tập {vol.volume_num}:")
+            print(f"    - RAW:       {bundle['raw']}")
+            print(f"    - EDITED:    {bundle['edited']}")
+            print(f"    - REPORT:    {bundle['report']}")
+            print(f"    - CHANGELOG: {bundle['changelog']}")
+        else:
+            print(f"[✓] Đã xuất Tập {vol.volume_num}: {bundle['txt']}")
 
 
 def cmd_process(args):
@@ -241,6 +245,7 @@ def main():
     p_merge.add_argument("--no-spellcheck", action="store_true", help="Tắt tính năng sửa chính tả")
     p_merge.add_argument("--use-ai", action="store_true", help="Bật phân tích lỗi bằng AI")
     p_merge.add_argument("--apply-ai", action="store_true", help="Tự động áp dụng cả các đề xuất của AI vào bản EDITED")
+    p_merge.add_argument("--export-reports", action="store_true", help="Xuất kèm báo cáo audit (.md, .json). Mặc định chỉ xuất duy nhất file TXT hoàn chỉnh.")
 
     # Subcommand: process
     p_proc = subparsers.add_parser("process", help="Thực hiện trọn gói pipeline từ nạp/tải đến xuất tập")
@@ -259,6 +264,7 @@ def main():
     p_proc.add_argument("--no-spellcheck", action="store_true", help="Tắt tính năng sửa chính tả")
     p_proc.add_argument("--use-ai", action="store_true", help="Bật phân tích lỗi bằng AI")
     p_proc.add_argument("--apply-ai", action="store_true", help="Tự động áp dụng cả các đề xuất của AI vào bản EDITED")
+    p_proc.add_argument("--export-reports", action="store_true", help="Xuất kèm báo cáo audit (.md, .json). Mặc định chỉ xuất duy nhất file TXT hoàn chỉnh.")
 
     args = parser.parse_args()
     if not args.command:

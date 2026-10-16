@@ -255,6 +255,7 @@ class TestFixesAndSafeties(unittest.TestCase):
             issues=[],
             edited_paragraphs_map={1: ["Đoạn 1."], 2: ["Đoạn 2."]},
             overwrite=False,
+            export_reports=True,
         )
         for k in ["raw", "edited", "report", "changelog"]:
             self.assertTrue(os.path.exists(bundle[k]))
@@ -270,7 +271,44 @@ class TestFixesAndSafeties(unittest.TestCase):
                 issues=[],
                 edited_paragraphs_map={1: ["Đoạn 1."], 2: ["Đoạn 2."]},
                 overwrite=False,
+                export_reports=True,
             )
+
+    def test_export_txt_only_by_default(self):
+        """12b. Kiểm tra mặc định chỉ xuất duy nhất 1 file TXT hoàn chỉnh, không sinh file rác md hay json."""
+        chaps = [
+            Chapter(chapter_num=1, raw_content="Đoạn 1."),
+            Chapter(chapter_num=2, raw_content="Đoạn 2."),
+        ]
+        merger = VolumeMerger(chapters_per_volume=2)
+        volumes = merger.build_volumes(chaps, start_volume_num=1, expected_start_chap=1, expected_end_chap=2)
+        out_dir = os.path.join(self.temp_dir, "export_txt_only_test")
+
+        bundle = ReportGenerator.export_volume_bundle(
+            volume=volumes[0],
+            output_dir=out_dir,
+            merger=merger,
+            issues=[],
+            edited_paragraphs_map={1: ["Đoạn 1 đã sửa."], 2: ["Đoạn 2 đã sửa."]},
+            overwrite=False,
+            export_reports=False,
+        )
+        self.assertTrue(os.path.exists(bundle["txt"]))
+        self.assertTrue(bundle["txt"].endswith("Tap_1_Chuong_1_den_2.txt"))
+
+        # Xác nhận trong thư mục CHỈ CÓ ĐÚNG 1 FILE TXT, không có file .md hay .json
+        files = os.listdir(out_dir)
+        self.assertEqual(len(files), 1)
+        self.assertEqual(files[0], "Tap_1_Chuong_1_den_2.txt")
+        self.assertFalse(any(f.endswith(".md") for f in files))
+        self.assertFalse(any(f.endswith(".json") for f in files))
+        self.assertFalse(any("_RAW" in f for f in files))
+        self.assertFalse(any("_EDITED" in f for f in files))
+
+        with open(bundle["txt"], "r", encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn("Đoạn 1 đã sửa.", content)
+        self.assertIn("Đoạn 2 đã sửa.", content)
 
     def test_markdown_escaping_pipes_and_tags(self):
         """13. Escape ký tự đặc biệt trong bảng Markdown không làm vỡ cấu trúc."""
