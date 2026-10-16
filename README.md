@@ -167,19 +167,65 @@ Mỗi tập được xuất thành 4 tệp đồng bộ:
 
 ### B. Cơ chế trích xuất liên kết và khôi phục tiến độ (Resume):
 - **Trích xuất liên kết chương kế tiếp:** Ưu tiên biến JavaScript `nextChap`. Nếu không có, quét các thẻ điều hướng HTML kiểm tra `rel="next"`, văn bản "chương tiếp", và xử lý triệt để bẫy của website khi cả thẻ "Chương trước" lẫn "Chương tiếp" đều mang `class='next'`.
-- **Khôi phục tiến độ an toàn:** Khi khôi phục các chương đã có sẵn trong CSDL (từ offline import hoặc lần chạy trước), liên kết `next_url` được tự động chuẩn hóa về URL trực tuyến (loại bỏ tiền tố `file://` cục bộ), phát hiện vòng lặp URL trước khi resume để tránh lặp vô tận.
+- **Khôi phục điều hướng khi bản lưu thiếu liên kết:** Khi khôi phục các chương đã có sẵn trong CSDL mà chương cuối cùng thiếu `next_url` (ví dụ Chương 4 lưu trong cache thiếu link kế tiếp), Crawler sẽ thực hiện tải lại trang web của Chương 4 để phân tích và khôi phục `next_url` mà **không ghi đè nội dung gốc** đã lưu trong CSDL (tuân thủ tính bất biến và versioning). Sau đó, tiếp tục tải bình thường từ Chương 5 đến 12.
+- **Không tự đoán mò URL:** Nếu không tìm thấy liên kết tiếp theo đáng tin cậy, Crawler dừng lại và trả về trạng thái `incomplete` kèm lý do cụ thể, tuyệt đối không đoán mò URL.
 
-### C. Ghi log chẩn đoán cho từng chương (Diagnostic Logs):
-Mỗi chương được ghi vết chi tiết:
-- Số chương dự kiến và số chương đọc được.
-- URL yêu cầu và URL sau chuyển hướng.
-- Mã phản hồi HTTP, Content-Type và kích thước (bytes).
-- Số đoạn và số ký tự nội dung trích xuất.
-- URL chương tiếp theo và nguồn lấy liên kết (`script_var:nextChap`, `html_nav:text`, ...).
-- Lý do dừng chính xác khi gặp lỗi hoặc dừng sớm.
-- **Cam kết bảo mật:** Tuyệt đối không ghi cookie, session token hay API key vào log.
+### C. Phân loại trạng thái tác vụ & Thống kê minh bạch:
+Crawler và giao diện Worker phân biệt rõ 6 nhóm trạng thái:
+1. `completed`: Hoàn tất thu thập đủ 100% số chương yêu cầu.
+2. `incomplete`: Chưa hoàn tất do thiếu liên kết hoặc thiếu chương.
+3. `blocked`: Bị chặn truy cập bởi máy chủ (HTTP 403, HTTP 429 hoặc Cloudflare Turnstile/CAPTCHA). Tự động dừng ngay, không cố vượt cơ chế bảo vệ.
+4. `network_error`: Lỗi kết nối mạng, DNS hoặc timeout.
+5. `parse_error`: Trang rỗng, cấu trúc HTML không hợp lệ hoặc thiếu vùng nội dung. Các trang này được lưu với trạng thái `failed`, tuyệt đối **không đánh dấu `verified`**.
+6. `stopped_by_user`: Người dùng chủ động tạm dừng hoặc hủy tác vụ.
 
-### D. Trạng thái hiển thị khi chưa hoàn tất:
-Nếu quá trình tải bị dừng sớm (ví dụ gặp HTTP 403/429, bị chuyển hướng về trang chủ hoặc thiếu liên kết tiếp theo):
-- Hệ thống hiển thị rõ ràng: `Chưa hoàn tất: X/Y chương` kèm nguyên nhân cụ thể.
-- Tuyệt đối không thông báo hoàn tất toàn bộ khi chưa tải đủ số chương yêu cầu.
+Hệ thống luôn phân định rõ và hiển thị 3 chỉ số số lượng:
+- **`cached_count`**: Số chương khôi phục từ CSDL.
+- **`downloaded_count`**: Số chương tải mới thành công qua mạng.
+- **`missing_count`**: Số chương còn thiếu trong khoảng yêu cầu.
+
+### D. Đồng bộ áp dụng sửa đổi và Báo cáo (Audit Trail):
+- **Tách biệt quyết định duyệt và kết quả áp dụng:**
+  - `user_decision`: Quyết định của người dùng (`approved`, `pending`, `rejected`).
+  - `applied_status`: Kết quả thực tế khi áp dụng vào văn bản (`applied`, `skipped_conflict`, `skipped_mismatch`, `skipped_pending`, `skipped_rejected`).
+  - `applied_reason`: Giải thích chi tiết nguyên nhân khi một đề xuất bị bỏ qua.
+- **Phân xử xung đột đề xuất chồng lấn:** Ưu tiên theo thứ tự độ tin cậy: `Từ điển (dictionary)` > `Quy tắc (rule)` > `AI phân tích (ai)`. Các đề xuất bị trùng vùng ký tự sẽ được gắn cờ `skipped_conflict` kèm thông tin đề xuất ưu tiên hơn, không tính vào số lỗi đã sửa.
+- **Kiểm tra lát cắt và băm nội dung:** Trước khi thay thế, hệ thống kiểm tra `original_hash` và lát cắt ký tự thực tế `[char_start:char_end]`. Bất kỳ sự sai lệch nào đều được đánh dấu `skipped_mismatch` và bỏ qua an toàn.
+- **Xử lý chuẩn hóa Unicode NFC / NFD:** Chuẩn hóa nhất quán NFC trên cả bản gốc và đề xuất sửa đổi, đảm bảo các ký tự tiếng Việt có dấu không bị lệch chỉ số.
+- **Thống kê chính xác tuyệt đối:** Chỉ tiêu "Số thay đổi đã áp dụng" trên Báo cáo Markdown, JSON Changelog và file EDITED TXT hoàn toàn đồng nhất và chỉ tính các thay đổi thực tế.
+
+### E. Cách ly Quyết định duyệt Đa truyện & Migration CSDL:
+- **Định danh duy nhất đa truyện:** Bảng `review_decisions` được định danh theo `UNIQUE(story_id, content_hash, issue_id, original, replacement)`. Hai tác phẩm khác nhau có cùng số chương, đoạn và vị trí lỗi sẽ hoàn toàn không bị ghi đè quyết định của nhau.
+- **Bảo toàn khi nội dung thay đổi:** Khi nội dung chương thay đổi sinh ra `content_hash` mới, hệ thống không tự động khôi phục quyết định cũ nếu chưa được xác thực lại.
+- **Migration tự động:** Tự động di chuyển CSDL phiên bản cũ sang cấu trúc mới, đánh dấu dữ liệu lịch sử là `legacy_unverified` để tránh tự ý áp dụng sai lệch.
+
+### F. Định dạng File Audio Chuẩn & Loại bỏ Tiêu đề Chương:
+- Mỗi tập gồm 4 chương theo thứ tự liên tiếp (Tập cuối có thể ít hơn nếu hết phạm vi truyện).
+- Không âm thầm gộp bù chương khi thiếu chương ở giữa; tập thiếu được gắn cảnh báo `DRAFT`.
+- Mẫu mở đầu và kết thúc hỗ trợ các biến `{tap}` / `{so_tap}`, `{chuong_dau}`, `{chuong_cuoi}`, `{tap_tiep_theo}` / `{so_tap_tiep_theo}`.
+- Tự động nhận diện và loại bỏ:
+  - Các đường phân cách như `------------------------------------------------------------` hoặc `==============================`.
+  - Các dòng tiêu đề chương do công cụ chèn như `=== CHƯƠNG 4: LUYỆN CỐT NHAI ===`.
+  - Dòng tiêu đề chương trùng với metadata chương.
+  - Tuyệt đối **không xóa** các câu văn bình thường trong truyện dù có chứa từ "chương" (ví dụ: *"Chương này là bí mật lớn nhất..."*, *"Họ Chương..."*).
+- Chuẩn hóa khoảng trắng cuối dòng bằng regex `\s\n` → `\n` đúng một lượt trên bản xuất audio sau khi chuẩn hóa CRLF/CR thành LF. Bản gốc luôn được giữ nguyên.
+
+---
+
+## 7. KẾT QUẢ KIỂM THỬ TOÀN DIỆN
+Bộ kiểm thử tự động gồm **53 test case** bao phủ toàn diện:
+- Kiểm tra khởi động CLI (`cli.py --help`) và GUI (PySide6 offscreen).
+- Tải 12 chương giả lập và gộp thành 3 tập hoàn chỉnh.
+- Cache chương 1–4, chương 4 thiếu `next_url` -> tải lại trang lấy điều hướng và tiếp tục đến chương 12.
+- Kiểm tra phân loại lỗi: HTTP 403, HTTP 429, timeout, trang rỗng, URL lặp, chuyển hướng sai.
+- Đề xuất chồng lấn, sai lệch hash, sai lệch văn bản lát cắt.
+- Xử lý Unicode NFC và NFD tiếng Việt.
+- Cách ly quyết định duyệt giữa các truyện và phiên bản nội dung.
+- Migration CSDL SQLite phiên bản cũ bảo toàn dữ liệu.
+- Định dạng audio, loại bỏ tiêu đề chương và chuẩn hóa `\s\n` -> `\n`.
+
+Chạy toàn bộ kiểm thử:
+```bash
+python -m unittest discover -s tests -p "test_*.py"
+```
+*Kết quả:* **53/53 test đạt (OK) 100%.**

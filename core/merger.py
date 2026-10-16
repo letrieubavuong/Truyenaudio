@@ -25,16 +25,55 @@ def normalize_trailing_spaces(text: str) -> str:
     return text
 
 
+def is_separator_or_inserted_title(line: str, chapter_num: Optional[int] = None, chapter_title: str = "") -> bool:
+    """
+    Kiểm tra xem dòng có phải là dòng phân cách hoặc tiêu đề chương chèn vào hay không:
+    - Bỏ các dòng phân cách như: ------------------------------------------------------------ hoặc ===...
+    - Bỏ tiêu đề chương được chương trình chèn như: === CHƯƠNG 4: LUYỆN CỐT NHAI ===
+    - Bỏ dòng tiêu đề khớp với chapter_title
+    - Không xóa các câu văn bình thường trong truyện dù có chứa từ 'chương'.
+    """
+    clean = line.strip()
+    if not clean:
+        return False
+
+    # 1. Dòng phân cách gồm ít nhất 3 ký tự phân cách (-, =, *, _, ~, #) có thể xen kẽ khoảng trắng
+    if re.match(r"^(\s*[-=*_~#]\s*){3,}$", clean):
+        return True
+
+    # 2. Tiêu đề chương được chèn dạng === CHƯƠNG X: ... === hoặc --- CHƯƠNG X: ... ---
+    if re.match(r"^={2,}\s*CHƯƠNG\s+\d+.*={2,}$", clean, re.IGNORECASE):
+        return True
+    if re.match(r"^[-*#]{2,}\s*CHƯƠNG\s+\d+.*[-*#]{2,}$", clean, re.IGNORECASE):
+        return True
+
+    # 3. Tiêu đề chương hoàn toàn khớp với chapter_title đã biết
+    if chapter_title and clean.lower() == chapter_title.strip().lower():
+        return True
+
+    # 4. Tiêu đề dạng: "Chương X: <Tiêu đề>" khi khớp với số chương của chương đó
+    if chapter_num is not None:
+        if chapter_title:
+            pat = rf"^(?:===|---|###)?\s*CHƯƠNG\s+{chapter_num}\s*[:\-\.]\s*{re.escape(chapter_title.strip())}\s*(?:===|---|###)?$"
+            if re.match(pat, clean, re.IGNORECASE):
+                return True
+        # Tiêu đề độc lập chỉ có số chương và nhãn: "Chương 4" hoặc "CHƯƠNG 4:"
+        if re.match(rf"^(?:===|---|###)?\s*CHƯƠNG\s+{chapter_num}\s*[:\-\.]?\s*(?:===|---|###)?$", clean, re.IGNORECASE):
+            return True
+
+    return False
+
+
 class VolumeMerger:
     DEFAULT_PROLOGUE = (
-        "PHÀM NHÂN TU TIÊN - TẬP {so_tap}\n"
+        "PHÀM NHÂN TU TIÊN - TẬP {tap}\n"
         "Chào mừng các bạn đang theo dõi bộ truyện tiên hiệp Phàm Nhân Tu Tiên, tác giả Vong Ngữ.\n"
-        "Đây là Tập {so_tap}, phát từ Chương {chuong_dau} đến Chương {chuong_cuoi}.\n"
+        "Đây là Tập {tap}, phát từ Chương {chuong_dau} đến Chương {chuong_cuoi}.\n"
         "Chúc các bạn có những giây phút thư giãn và trải nghiệm tuyệt vời."
     )
 
     DEFAULT_EPILOGUE = (
-        "Hết Tập {so_tap}: Cảm ơn quý thính giả đã chú ý lắng nghe. Hẹn gặp lại các bạn trong Tập {so_tap_tiep_theo} tiếp theo!"
+        "Hết Tập {tap}: Cảm ơn quý thính giả đã chú ý lắng nghe. Hẹn gặp lại các bạn trong Tập {tap_tiep_theo} tiếp theo!"
     )
 
     def __init__(
@@ -113,31 +152,26 @@ class VolumeMerger:
             so_tap = current_vol_num
             so_tap_tiep_theo = current_vol_num + 1
 
+            format_kwargs = {
+                "tap": so_tap,
+                "so_tap": so_tap,
+                "chuong_dau": chuong_dau,
+                "chuong_cuoi": chuong_cuoi,
+                "tap_tiep_theo": so_tap_tiep_theo,
+                "so_tap_tiep_theo": so_tap_tiep_theo,
+                "story_title": story_title or "Phàm Nhân Tu Tiên",
+                "volume_num": so_tap,
+                "start_chapter": chuong_dau,
+                "end_chapter": chuong_cuoi,
+            }
+
             prologue_text = ""
             if self.include_prologue:
-                prologue_text = self.prologue_template.format(
-                    so_tap=so_tap,
-                    chuong_dau=chuong_dau,
-                    chuong_cuoi=chuong_cuoi,
-                    so_tap_tiep_theo=so_tap_tiep_theo,
-                    story_title=story_title or "Phàm Nhân Tu Tiên",
-                    volume_num=so_tap,
-                    start_chapter=chuong_dau,
-                    end_chapter=chuong_cuoi,
-                )
+                prologue_text = self.prologue_template.format(**format_kwargs)
 
             epilogue_text = ""
             if self.include_epilogue:
-                epilogue_text = self.epilogue_template.format(
-                    so_tap=so_tap,
-                    chuong_dau=chuong_dau,
-                    chuong_cuoi=chuong_cuoi,
-                    so_tap_tiep_theo=so_tap_tiep_theo,
-                    story_title=story_title or "Phàm Nhân Tu Tiên",
-                    volume_num=so_tap,
-                    start_chapter=chuong_dau,
-                    end_chapter=chuong_cuoi,
-                )
+                epilogue_text = self.epilogue_template.format(**format_kwargs)
 
             volume = Volume(
                 volume_num=current_vol_num,
@@ -199,7 +233,9 @@ class VolumeMerger:
             for p in paras:
                 clean_p = p.strip("\r\n")
                 if clean_p.strip():
-                    if ch.chapter_title and clean_p.strip().lower() == ch.chapter_title.strip().lower():
+                    if is_separator_or_inserted_title(
+                        clean_p, chapter_num=ch.chapter_num, chapter_title=ch.chapter_title
+                    ):
                         continue
                     blocks.append(clean_p)
 

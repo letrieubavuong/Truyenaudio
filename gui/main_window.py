@@ -352,18 +352,39 @@ class MainWindow(QMainWindow):
         total = res.get("total_requested", 0) if isinstance(res, dict) else len(chapters)
         status_msg = res.get("status_message", "") if isinstance(res, dict) else ""
         stop_reason = res.get("stop_reason", "") if isinstance(res, dict) else ""
+        status_category = res.get("status", "") if isinstance(res, dict) else ("completed" if is_success else "incomplete")
+        cached_count = res.get("cached_count", 0) if isinstance(res, dict) else 0
+        downloaded_count = res.get("downloaded_count", 0) if isinstance(res, dict) else 0
+        missing_count = res.get("missing_count", 0) if isinstance(res, dict) else 0
 
-        if not is_success and total > 0 and fetched < total:
-            warning_msg = f"Chưa hoàn tất: {fetched}/{total} chương. Nguyên nhân: {stop_reason or 'Tác vụ dừng sớm hơn yêu cầu.'}"
+        if not is_success or status_category != "completed" or (total > 0 and fetched < total):
+            category_names = {
+                "blocked": "Bị chặn truy cập (HTTP 403/429 hoặc trang thử thách)",
+                "network_error": "Lỗi kết nối mạng",
+                "parse_error": "Lỗi phân tích cú pháp HTML hoặc điều hướng",
+                "stopped_by_user": "Người dùng đã dừng",
+                "incomplete": "Chưa hoàn tất",
+            }
+            cat_label = category_names.get(status_category, "Chưa hoàn tất")
+            reason_text = stop_reason or status_msg or "Tác vụ dừng sớm hơn yêu cầu."
+            warning_msg = (
+                f"Tác vụ kết thúc [{cat_label}]: {fetched}/{total} chương "
+                f"(Từ cache: {cached_count}, Tải mới: {downloaded_count}, Còn thiếu: {missing_count}). "
+                f"Chi tiết: {reason_text}"
+            )
             self.log("WARNING", warning_msg)
-            self.status_bar.showMessage(f"Chưa hoàn tất: {fetched}/{total} chương")
+            self.status_bar.showMessage(f"{cat_label}: {fetched}/{total} chương (Thiếu {missing_count})")
 
             # Hộp thoại cảnh báo chưa hoàn tất
             reply = QMessageBox.warning(
                 self,
-                "Thu thập chưa hoàn tất",
-                f"Tác vụ chưa hoàn tất: {fetched}/{total} chương.\n\n"
-                f"Nguyên nhân dừng: {stop_reason or 'Không xác định'}\n\n"
+                f"Thu thập chưa hoàn tất: {cat_label}",
+                f"Trạng thái: {cat_label}\n"
+                f"Tiến độ: {fetched}/{total} chương\n"
+                f"- Số chương từ cache: {cached_count}\n"
+                f"- Số chương tải mới: {downloaded_count}\n"
+                f"- Số chương còn thiếu: {missing_count}\n\n"
+                f"Nguyên nhân: {reason_text}\n\n"
                 f"Bạn có muốn tiếp tục hiệu đính và xuất các chương đã có ({fetched} chương) không?",
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.No,
@@ -376,7 +397,11 @@ class MainWindow(QMainWindow):
                 self.btn_pause.setEnabled(False)
                 self.btn_resume.setEnabled(False)
         else:
-            self.log("SUCCESS", f"Hoàn tất thu thập dữ liệu: {fetched}/{total} chương.")
+            success_msg = (
+                f"Hoàn tất thu thập dữ liệu: {fetched}/{total} chương "
+                f"(Từ cache: {cached_count}, Tải mới: {downloaded_count})."
+            )
+            self.log("SUCCESS", success_msg)
             self.status_bar.showMessage(f"Đã tải đủ {fetched}/{total} chương")
             self.start_spellcheck_analysis()
 

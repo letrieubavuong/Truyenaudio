@@ -21,8 +21,22 @@ class SpellIssue:
     category: str = "chinh_ta"  # 'chinh_ta', 'dau_cau', 'khoang_trang', 'lap_cau', 'gach_duoi_thua', 'ten_rieng'
     reason: str = ""
     source: str = "rule"  # 'rule', 'dictionary', 'ai'
-    status: str = "applied"  # 'applied', 'pending', 'rejected'
+    status: str = "applied"  # 'applied', 'pending', 'rejected', 'skipped_conflict', 'skipped_mismatch'
     confidence: Optional[float] = None
+    user_decision: str = ""  # 'approved', 'pending', 'rejected'
+    applied_status: str = ""  # 'applied', 'skipped_conflict', 'skipped_mismatch', 'skipped_pending', 'skipped_rejected'
+    applied_reason: str = ""  # Giải thích chi tiết khi bị bỏ qua / không áp dụng được
+
+    def __post_init__(self):
+        if not self.user_decision:
+            if self.status == "applied":
+                self.user_decision = "approved"
+            elif self.status == "rejected":
+                self.user_decision = "rejected"
+            else:
+                self.user_decision = "pending"
+        if not self.applied_status:
+            self.applied_status = "applied" if self.status == "applied" else "pending"
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -40,6 +54,9 @@ class SpellIssue:
             "source": self.source,
             "status": self.status,
             "confidence": self.confidence,
+            "user_decision": self.user_decision,
+            "applied_status": self.applied_status,
+            "applied_reason": self.applied_reason,
         }
 
     @classmethod
@@ -47,7 +64,8 @@ class SpellIssue:
         valid_keys = {
             "id", "original_hash", "chapter_num", "chapter_title",
             "paragraph_idx", "char_start", "char_end", "original",
-            "replacement", "category", "reason", "source", "status", "confidence"
+            "replacement", "category", "reason", "source", "status", "confidence",
+            "user_decision", "applied_status", "applied_reason"
         }
         filtered = {k: v for k, v in data.items() if k in valid_keys}
         return cls(**filtered)

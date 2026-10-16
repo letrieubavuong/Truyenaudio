@@ -391,16 +391,16 @@ class VietnameseSpellChecker:
                                 )
                             )
 
-        # Lọc bỏ các issue chồng lấn và các issue vô nghĩa (orig == rep)
+        # Lọc bỏ các issue vô nghĩa (orig == rep)
         valid_candidates = [
             i for i in issues if i.original != i.replacement and i.char_start < i.char_end
         ]
-        non_overlapping_issues = self._resolve_overlapping_issues(valid_candidates)
+        # Áp dụng và giải quyết xung đột bằng apply_fixes_with_audit
+        edited_para, resolved_issues = self.apply_fixes_with_audit(
+            norm_para, valid_candidates, approved_only=True
+        )
 
-        # Áp dụng các thay đổi đã được duyệt (status == 'applied')
-        edited_para = self.apply_fixes(norm_para, non_overlapping_issues, approved_only=True)
-
-        return edited_para, non_overlapping_issues
+        return edited_para, resolved_issues
 
     def check_chapter(
         self,
@@ -421,54 +421,175 @@ class VietnameseSpellChecker:
 
         return edited_paragraphs, all_issues
 
-    @staticmethod
-    def _resolve_overlapping_issues(issues: List[SpellIssue]) -> List[SpellIssue]:
-        """Lọc bỏ các issue chồng lấn một cách an toàn."""
+    @classmethod
+    def _resolve_overlapping_issues(cls, issues: List[SpellIssue]) -> List[SpellIssue]:
+        """Lọc bỏ các issue chồng lấn một cách an toàn (ưu tiên dictionary > rule > ai)."""
         if not issues:
             return []
 
-        sorted_issues = sorted(issues, key=lambda x: (x.char_start, -(x.char_end - x.char_start)))
+        source_priority = {"dictionary": 3, "rule": 2, "ai": 1}
+
+        def sort_key(item: SpellIssue):
+            s_prio = source_priority.get(item.source.lower(), 0)
+            conf = item.confidence if item.confidence is not None else 0.0
+            span_len = item.char_end - item.char_start
+            return (s_prio, conf, span_len, -item.char_start)
+
+        sorted_issues = sorted(issues, key=sort_key, reverse=True)
         resolved: List[SpellIssue] = []
 
-        last_end = -1
-        for issue in sorted_issues:
-            if issue.char_start >= last_end:
-                resolved.append(issue)
-                last_end = issue.char_end
+        for cand in sorted_issues:
+            conflict = False
+            for acc in resolved:
+                if max(cand.char_start, acc.char_start) < min(cand.char_end, acc.char_end):
+                    conflict = True
+                    break
+            if not conflict:
+                resolved.append(cand)
 
-        return resolved
+        return sorted(resolved, key=lambda x: (x.char_start, x.char_end))
 
-    @staticmethod
-    def apply_fixes(
-        original_text: str, issues: List[SpellIssue], approved_only: bool = True
-    ) -> str:
+    @classmethod
+    def apply_fixes_with_audit(
+        cls, original_text: str, issues: List[SpellIssue], approved_only: bool = True
+    ) -> Tuple[str, List[SpellIssue]]:
         """
-        Áp dụng các thay đổi từ cuối lên đầu để không làm lệch chỉ số ký tự.
-        Trước khi thay thế, kiểm tra lát cắt tại [char_start:char_end] phải khớp chính xác với issue.original.
-        Nếu không khớp hoặc chồng lấn, bỏ qua một cách an toàn.
+        Áp dụng các đề xuất sửa đổi và trả về:
+        (chuỗi_sau_khi_sửa, danh_sách_issue_kèm_kết_quả_áp_dụng_và_nguyên_nhân).
+
+        Yêu cầu kỹ thuật:
+        - Xử lý nhất quán Unicode NFC trên cả bản gốc và nội dung đề xuất.
+        - Kiểm tra original_hash (nếu có): hash không khớp -> skipped_mismatch.
+        - Kiểm tra bounds [char_start:char_end] và lát cắt thực tế: không khớp -> skipped_mismatch.
+        - Phân xử xung đột chồng lấn theo thứ tự ưu tiên: dictionary > rule > ai.
+        - Đề xuất bị chồng lấn -> skipped_conflict kèm thông tin đề xuất ưu tiên hơn.
+        - Đề xuất bị từ chối (user_decision == 'rejected') -> skipped_rejected.
+        - Đề xuất chờ duyệt khi approved_only=True -> skipped_pending.
+        - Đề xuất thỏa mãn: áp dụng từ cuối lên đầu (tránh lệch offset) -> applied.
         """
         if not issues:
-            return original_text
+            return unicodedata.normalize("NFC", original_text), []
 
-        valid_issues = [
-            i for i in issues if (not approved_only or i.status == "applied")
-        ]
-        # Sắp xếp từ cuối lên đầu
-        valid_issues = sorted(valid_issues, key=lambda x: (x.char_start, x.char_end), reverse=True)
+        # 1. Chuẩn hóa NFC bản gốc
+        text_nfc = unicodedata.normalize("NFC", original_text)
+        current_hash = hashlib.sha256(text_nfc.encode("utf-8")).hexdigest()[:16]
 
-        res = original_text
-        last_applied_start = len(res) + 1
+        # 2. Phân loại theo quyết định của người dùng và tính hợp lệ ban đầu
+        candidates_to_apply: List[SpellIssue] = []
 
-        for issue in valid_issues:
-            start = issue.char_start
-            end = issue.char_end
-            if 0 <= start <= end <= len(res):
-                if end > last_applied_start:
-                    continue
-                actual = res[start:end]
-                if actual != issue.original:
-                    continue
-                res = res[:start] + issue.replacement + res[end:]
-                last_applied_start = start
+        for iss in issues:
+            if iss.status == "applied":
+                u_dec = "approved"
+            elif iss.status == "rejected":
+                u_dec = "rejected"
+            elif iss.status == "pending":
+                u_dec = "pending"
+            else:
+                u_dec = getattr(iss, "user_decision", "approved")
+            iss.user_decision = u_dec
 
-        return res
+            # Nếu người dùng từ chối
+            if u_dec == "rejected":
+                iss.applied_status = "skipped_rejected"
+                iss.applied_reason = "Người dùng từ chối đề xuất"
+                iss.status = "rejected"
+                continue
+
+            # Nếu đang chờ duyệt và chỉ áp dụng đề xuất đã duyệt
+            if approved_only and u_dec == "pending":
+                iss.applied_status = "skipped_pending"
+                iss.applied_reason = "Đề xuất đang chờ người dùng duyệt"
+                iss.status = "pending"
+                continue
+
+            # Chuẩn hóa NFC cho original & replacement của issue
+            orig_nfc = unicodedata.normalize("NFC", iss.original)
+            iss.original = orig_nfc
+            iss.replacement = unicodedata.normalize("NFC", iss.replacement)
+
+            # Kiểm tra hash nếu issue có lưu original_hash
+            if iss.original_hash and iss.original_hash != current_hash:
+                iss.applied_status = "skipped_mismatch"
+                iss.applied_reason = f"Hash nội dung không khớp (gốc: {iss.original_hash}, hiện tại: {current_hash})"
+                iss.status = "skipped_mismatch"
+                continue
+
+            # Kiểm tra giới hạn vị trí
+            if not (0 <= iss.char_start <= iss.char_end <= len(text_nfc)):
+                iss.applied_status = "skipped_mismatch"
+                iss.applied_reason = f"Vị trí [{iss.char_start}:{iss.char_end}] ngoài độ dài văn bản ({len(text_nfc)})"
+                iss.status = "skipped_mismatch"
+                continue
+
+            # Kiểm tra lát cắt văn bản thực tế
+            actual_slice = text_nfc[iss.char_start:iss.char_end]
+            if actual_slice != orig_nfc:
+                iss.applied_status = "skipped_mismatch"
+                iss.applied_reason = f"Nội dung tại [{iss.char_start}:{iss.char_end}] ('{actual_slice}') không khớp với '{orig_nfc}'"
+                iss.status = "skipped_mismatch"
+                continue
+
+            candidates_to_apply.append(iss)
+
+        # 3. Phân xử xung đột giữa các ứng viên được duyệt
+        # Thứ tự ưu tiên nguồn: dictionary (3) > rule (2) > ai (1)
+        source_priority = {"dictionary": 3, "rule": 2, "ai": 1}
+
+        def sort_key(item: SpellIssue):
+            s_prio = source_priority.get(item.source.lower(), 0)
+            conf = item.confidence if item.confidence is not None else 0.0
+            span_len = item.char_end - item.char_start
+            return (s_prio, conf, span_len, -item.char_start)
+
+        sorted_candidates = sorted(candidates_to_apply, key=sort_key, reverse=True)
+        accepted_issues: List[SpellIssue] = []
+
+        for cand in sorted_candidates:
+            # Kiểm tra xem có chồng lấn với issue nào đã được chấp nhận trước đó không
+            conflict_with: Optional[SpellIssue] = None
+            for acc in accepted_issues:
+                if max(cand.char_start, acc.char_start) < min(cand.char_end, acc.char_end):
+                    conflict_with = acc
+                    break
+
+            if conflict_with:
+                cand.applied_status = "skipped_conflict"
+                cand.applied_reason = (
+                    f"Xung đột vùng [{cand.char_start}:{cand.char_end}] với đề xuất ưu tiên hơn "
+                    f"({conflict_with.source}: '{conflict_with.original}' -> '{conflict_with.replacement}')"
+                )
+                cand.status = "skipped_conflict"
+            else:
+                accepted_issues.append(cand)
+
+        # 4. Áp dụng các thay đổi từ cuối lên đầu
+        accepted_sorted = sorted(accepted_issues, key=lambda x: (x.char_start, x.char_end), reverse=True)
+        last_applied_start = len(text_nfc) + 1
+
+        for iss in accepted_sorted:
+            start = iss.char_start
+            end = iss.char_end
+            if end > last_applied_start:
+                iss.applied_status = "skipped_conflict"
+                iss.applied_reason = "Xung đột vùng áp dụng với thay đổi khác"
+                iss.status = "skipped_conflict"
+                continue
+
+            text_nfc = text_nfc[:start] + iss.replacement + text_nfc[end:]
+            last_applied_start = start
+            iss.applied_status = "applied"
+            iss.applied_reason = "Đã áp dụng thành công"
+            iss.status = "applied"
+
+        return text_nfc, issues
+
+    @classmethod
+    def apply_fixes(
+        cls, original_text: str, issues: List[SpellIssue], approved_only: bool = True
+    ) -> str:
+        """
+        Áp dụng các thay đổi từ cuối lên đầu và trả về văn bản đã sửa.
+        Đồng bộ hoàn toàn với apply_fixes_with_audit.
+        """
+        edited_text, _ = cls.apply_fixes_with_audit(original_text, issues, approved_only=approved_only)
+        return edited_text

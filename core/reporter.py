@@ -37,18 +37,30 @@ class ReportGenerator:
     def calculate_statistics(cls, issues: List[SpellIssue]) -> Dict[str, Any]:
         """
         Tính toán thống kê theo quy ước:
-        - Tổng số đề xuất = applied + pending + rejected.
-        - Số đã áp dụng chỉ tính các thay đổi thực sự có trạng thái 'applied'.
+        - Tổng số đề xuất = applied + pending + rejected + skipped.
+        - Số đã áp dụng chỉ tính các thay đổi thực sự có trạng thái 'applied' (applied_status == 'applied').
+        - Tách riêng: Chờ duyệt (pending), Từ chối (rejected), và Không áp dụng được / xung đột (skipped).
         """
-        applied_count = sum(1 for i in issues if i.status == "applied")
-        pending_count = sum(1 for i in issues if i.status == "pending")
-        rejected_count = sum(1 for i in issues if i.status == "rejected")
+        applied_count = sum(1 for i in issues if getattr(i, "applied_status", i.status) == "applied")
+        pending_count = sum(
+            1 for i in issues
+            if getattr(i, "user_decision", i.status) == "pending" or getattr(i, "applied_status", "") == "skipped_pending"
+        )
+        rejected_count = sum(
+            1 for i in issues
+            if getattr(i, "user_decision", i.status) == "rejected" or getattr(i, "applied_status", "") == "skipped_rejected"
+        )
+        skipped_count = sum(
+            1 for i in issues
+            if getattr(i, "applied_status", i.status) in ("skipped_conflict", "skipped_mismatch")
+        )
 
         stats = {
             "total_suggestions": len(issues),
             "applied": applied_count,
             "pending": pending_count,
             "rejected": rejected_count,
+            "skipped": skipped_count,
             "by_category": {},
         }
 
@@ -58,17 +70,23 @@ class ReportGenerator:
                 "applied": 0,
                 "pending": 0,
                 "rejected": 0,
+                "skipped": 0,
             }
 
         for issue in issues:
             cat = issue.category if issue.category in stats["by_category"] else "chinh_ta"
             stats["by_category"][cat]["total"] += 1
-            if issue.status == "applied":
+            app_st = getattr(issue, "applied_status", issue.status)
+            u_dec = getattr(issue, "user_decision", issue.status)
+
+            if app_st == "applied":
                 stats["by_category"][cat]["applied"] += 1
-            elif issue.status == "pending":
-                stats["by_category"][cat]["pending"] += 1
-            elif issue.status == "rejected":
+            elif app_st in ("skipped_conflict", "skipped_mismatch"):
+                stats["by_category"][cat]["skipped"] += 1
+            elif u_dec == "rejected" or app_st == "skipped_rejected":
                 stats["by_category"][cat]["rejected"] += 1
+            elif u_dec == "pending" or app_st == "skipped_pending":
+                stats["by_category"][cat]["pending"] += 1
 
         return stats
 
@@ -93,26 +111,35 @@ class ReportGenerator:
 
         md.append("## 1. TỔNG QUAN VÀ THỐNG KÊ LỖI")
         md.append(f"- **Tổng số vị trí phát hiện / đề xuất:** **{stats['total_suggestions']}**")
-        md.append(f"- **Số thay đổi đã áp dụng:** **{stats['applied']}**")
+        md.append(f"- **Số thay đổi đã áp dụng thực tế:** **{stats['applied']}**")
         md.append(f"- **Số thay đổi chờ duyệt (Pending):** **{stats['pending']}**")
         md.append(f"- **Số đề xuất bị từ chối (Rejected):** **{stats['rejected']}**")
+        md.append(f"- **Số đề xuất không áp dụng được / xung đột (Skipped):** **{stats.get('skipped', 0)}**")
         md.append(f"- *Lưu ý:* Chuẩn hóa Unicode NFC không tính vào số lỗi chính tả.\n")
 
         md.append("### Bảng thống kê theo nhóm lỗi:")
-        md.append("| Nhóm lỗi | Tổng số | Đã áp dụng | Chờ duyệt | Từ chối |")
-        md.append("| :--- | :---: | :---: | :---: | :---: |")
+        md.append("| Nhóm lỗi | Tổng số | Đã áp dụng | Chờ duyệt | Từ chối | Không áp dụng được |")
+        md.append("| :--- | :---: | :---: | :---: | :---: | :---: |")
 
         for cat_key, label in cls.CATEGORY_LABELS.items():
-            cat_data = stats["by_category"].get(cat_key, {"total": 0, "applied": 0, "pending": 0, "rejected": 0})
-            md.append(f"| {label} | {cat_data['total']} | {cat_data['applied']} | {cat_data['pending']} | {cat_data['rejected']} |")
+            cat_data = stats["by_category"].get(
+                cat_key, {"total": 0, "applied": 0, "pending": 0, "rejected": 0, "skipped": 0}
+            )
+            md.append(
+                f"| {label} | {cat_data['total']} | {cat_data['applied']} | {cat_data['pending']} | "
+                f"{cat_data['rejected']} | {cat_data.get('skipped', 0)} |"
+            )
 
         md.append("\n---\n")
         md.append("## 2. DANH SÁCH CHI TIẾT TỪNG THAY ĐỔI")
         if not issues:
             md.append("*Không phát hiện lỗi hoặc không có đề xuất thay đổi nào.*")
         else:
-            md.append("| STT | Chương | Đoạn | Vị trí (Ký tự) | Nội dung gốc | Nội dung sửa | Nhóm lỗi | Lý do | Nguồn | Trạng thái |")
-            md.append("| :---: | :---: | :---: | :---: | :--- | :--- | :--- | :--- | :---: | :---: |")
+            md.append(
+                "| STT | Chương | Đoạn | Vị trí (Ký tự) | Nội dung gốc | Nội dung sửa | Nhóm lỗi | "
+                "Lý do | Nguồn | Quyết định | Kết quả áp dụng |"
+            )
+            md.append("| :---: | :---: | :---: | :---: | :--- | :--- | :--- | :--- | :---: | :---: | :--- |")
 
             for idx, iss in enumerate(issues, 1):
                 chap_name = f"Chương {iss.chapter_num}" if iss.chapter_num else "Chương ?"
@@ -120,11 +147,27 @@ class ReportGenerator:
                 rep_disp = escape_md(repr(iss.replacement)[1:-1]) if iss.replacement else "(xóa)"
                 cat_label = cls.CATEGORY_LABELS.get(iss.category, iss.category)
                 reason_disp = escape_md(iss.reason)
-                status_badge = "Đã áp dụng" if iss.status == "applied" else ("Chờ duyệt" if iss.status == "pending" else "Từ chối")
+
+                u_dec = getattr(iss, "user_decision", "approved" if iss.status == "applied" else iss.status)
+                app_st = getattr(iss, "applied_status", iss.status)
+                app_reason = getattr(iss, "applied_reason", "")
+
+                dec_badge = "Đã duyệt" if u_dec == "approved" else ("Từ chối" if u_dec == "rejected" else "Chờ duyệt")
+                if app_st == "applied":
+                    result_badge = "Đã sửa thành công"
+                elif app_st == "skipped_conflict":
+                    result_badge = f"Bỏ qua (Xung đột: {escape_md(app_reason)})"
+                elif app_st == "skipped_mismatch":
+                    result_badge = f"Bỏ qua (Không khớp: {escape_md(app_reason)})"
+                elif app_st == "skipped_rejected":
+                    result_badge = "Bỏ qua (Người dùng từ chối)"
+                else:
+                    result_badge = "Chờ duyệt"
 
                 md.append(
                     f"| {idx} | {chap_name} | Đoạn {iss.paragraph_idx} | {iss.char_start}-{iss.char_end} | "
-                    f"`{orig_disp}` | `{rep_disp}` | {cat_label} | {reason_disp} | {iss.source} | {status_badge} |"
+                    f"`{orig_disp}` | `{rep_disp}` | {cat_label} | {reason_disp} | {iss.source} | "
+                    f"{dec_badge} | {result_badge} |"
                 )
 
         md.append("\n---\n")

@@ -91,23 +91,79 @@ class StorageManager:
             """)
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_ver_chap ON chapter_versions(chapter_id)")
 
-            # 4. Bảng lưu trữ quyết định duyệt lỗi (Audit Review Decisions)
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS review_decisions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    issue_id TEXT UNIQUE,
-                    story_id INTEGER,
-                    chapter_num INTEGER,
-                    paragraph_idx INTEGER,
-                    char_start INTEGER,
-                    char_end INTEGER,
-                    original TEXT,
-                    replacement TEXT,
-                    status TEXT,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_rev_story ON review_decisions(story_id, chapter_num)")
+            # 4. Bảng lưu trữ quyết định duyệt lỗi (Audit Review Decisions) đa truyện, phân biệt theo phiên bản/hash nội dung
+            cursor.execute("PRAGMA table_info(review_decisions)")
+            rev_cols = [row["name"] for row in cursor.fetchall()]
+            if rev_cols and "content_hash" not in rev_cols:
+                # Migration an toàn: Di chuyển CSDL cũ sang bảng v2 có ràng buộc đa truyện & hash
+                story_expr = "COALESCE(story_id, 1)" if "story_id" in rev_cols else "1"
+                chap_expr = "chapter_num" if "chapter_num" in rev_cols else "NULL"
+                para_expr = "paragraph_idx" if "paragraph_idx" in rev_cols else "NULL"
+                cstart_expr = "char_start" if "char_start" in rev_cols else "NULL"
+                cend_expr = "char_end" if "char_end" in rev_cols else "NULL"
+                orig_expr = "original" if "original" in rev_cols else "NULL"
+                rep_expr = "replacement" if "replacement" in rev_cols else "NULL"
+                stat_expr = "status" if "status" in rev_cols else "'applied'"
+                time_expr = "updated_at" if "updated_at" in rev_cols else "CURRENT_TIMESTAMP"
+
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS review_decisions_v2 (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        story_id INTEGER NOT NULL,
+                        content_hash TEXT NOT NULL,
+                        issue_id TEXT NOT NULL,
+                        chapter_num INTEGER,
+                        paragraph_idx INTEGER,
+                        char_start INTEGER,
+                        char_end INTEGER,
+                        original TEXT,
+                        replacement TEXT,
+                        source TEXT,
+                        status TEXT,
+                        user_decision TEXT,
+                        applied_status TEXT,
+                        applied_reason TEXT,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(story_id, content_hash, issue_id, original, replacement)
+                    )
+                """)
+                cursor.execute(f"""
+                    INSERT OR IGNORE INTO review_decisions_v2 (
+                        id, story_id, content_hash, issue_id, chapter_num, paragraph_idx,
+                        char_start, char_end, original, replacement, status, updated_at
+                    )
+                    SELECT
+                        id, {story_expr}, 'legacy_unverified', issue_id, {chap_expr}, {para_expr},
+                        {cstart_expr}, {cend_expr}, {orig_expr}, {rep_expr}, {stat_expr}, {time_expr}
+                    FROM review_decisions
+                """)
+                cursor.execute("DROP TABLE review_decisions")
+                cursor.execute("ALTER TABLE review_decisions_v2 RENAME TO review_decisions")
+            elif not rev_cols:
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS review_decisions (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        story_id INTEGER NOT NULL,
+                        content_hash TEXT NOT NULL,
+                        issue_id TEXT NOT NULL,
+                        chapter_num INTEGER,
+                        paragraph_idx INTEGER,
+                        char_start INTEGER,
+                        char_end INTEGER,
+                        original TEXT,
+                        replacement TEXT,
+                        source TEXT,
+                        status TEXT,
+                        user_decision TEXT,
+                        applied_status TEXT,
+                        applied_reason TEXT,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(story_id, content_hash, issue_id, original, replacement)
+                    )
+                """)
+
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_rev_lookup ON review_decisions(story_id, content_hash)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_rev_story_chap ON review_decisions(story_id, chapter_num)")
 
             conn.commit()
 
@@ -394,44 +450,104 @@ class StorageManager:
             missing = [num for num in range(start_chap, end_chap + 1) if num not in existing]
             return missing
 
+    def update_chapter_navigation(
+        self, chapter_id: int, prev_url: Optional[str] = None, next_url: Optional[str] = None
+    ) -> bool:
+        """Cập nhật liên kết điều hướng cho chương đã lưu mà không ghi đè raw_content bất biến."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            updates = []
+            params = []
+            if prev_url is not None:
+                updates.append("prev_url = ?")
+                params.append(prev_url)
+            if next_url is not None:
+                updates.append("next_url = ?")
+                params.append(next_url)
+            if not updates:
+                return False
+            params.append(chapter_id)
+            cursor.execute(f"UPDATE chapters SET {', '.join(updates)} WHERE id = ?", params)
+            conn.commit()
+            return cursor.rowcount > 0
+
     def save_review_decisions(self, story_id: Optional[int], issues: List[SpellIssue]):
-        """Lưu hoặc cập nhật trạng thái duyệt (applied/rejected) của người dùng vào CSDL."""
+        """
+        Lưu hoặc cập nhật trạng thái duyệt của người dùng vào CSDL.
+        Bảo đảm định danh duy nhất theo (story_id, content_hash, issue_id, original, replacement),
+        tuyệt đối không bị ghi đè chéo giữa 2 truyện hoặc khi nội dung thay đổi.
+        """
         s_id = story_id if story_id is not None else self.get_default_story_id()
         with self._get_connection() as conn:
             cursor = conn.cursor()
             for iss in issues:
+                c_hash = iss.original_hash or "unhashed"
+                u_dec = getattr(iss, "user_decision", "approved" if iss.status == "applied" else iss.status)
+                app_stat = getattr(iss, "applied_status", iss.status)
+                app_reason = getattr(iss, "applied_reason", "")
+
                 cursor.execute("""
                     INSERT INTO review_decisions (
-                        issue_id, story_id, chapter_num, paragraph_idx,
-                        char_start, char_end, original, replacement, status, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                    ON CONFLICT(issue_id) DO UPDATE SET
+                        story_id, content_hash, issue_id, chapter_num, paragraph_idx,
+                        char_start, char_end, original, replacement, source, status,
+                        user_decision, applied_status, applied_reason, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(story_id, content_hash, issue_id, original, replacement) DO UPDATE SET
                         status = excluded.status,
+                        user_decision = excluded.user_decision,
+                        applied_status = excluded.applied_status,
+                        applied_reason = excluded.applied_reason,
                         updated_at = CURRENT_TIMESTAMP
                 """, (
-                    iss.id,
                     s_id,
+                    c_hash,
+                    iss.id,
                     iss.chapter_num,
                     iss.paragraph_idx,
                     iss.char_start,
                     iss.char_end,
                     iss.original,
                     iss.replacement,
+                    iss.source,
                     iss.status,
+                    u_dec,
+                    app_stat,
+                    app_reason,
                 ))
             conn.commit()
 
-    def get_review_decisions(self, story_id: Optional[int] = None) -> Dict[str, str]:
-        """Tải các quyết định duyệt đã lưu (issue_id -> status)."""
+    def get_review_decisions(
+        self, story_id: Optional[int] = None, content_hash: Optional[str] = None
+    ) -> Dict[str, str]:
+        """
+        Tải các quyết định duyệt đã lưu theo story_id và content_hash.
+        Trả về dict ánh xạ decision signature -> status.
+        Không khôi phục quyết định cũ khi nội dung hoặc đề xuất đã thay đổi.
+        """
         s_id = story_id if story_id is not None else self.get_default_story_id()
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(
-                "SELECT issue_id, status FROM review_decisions WHERE story_id = ?",
-                (s_id,),
-            )
+            if content_hash:
+                cursor.execute("""
+                    SELECT issue_id, original, replacement, status
+                    FROM review_decisions
+                    WHERE story_id = ? AND content_hash = ?
+                """, (s_id, content_hash))
+            else:
+                # Nếu không truyền hash cụ thể, không tải các bản ghi legacy_unverified để tránh tự áp dụng sai
+                cursor.execute("""
+                    SELECT issue_id, original, replacement, status
+                    FROM review_decisions
+                    WHERE story_id = ? AND content_hash != 'legacy_unverified'
+                """, (s_id,))
+
             rows = cursor.fetchall()
-            return {r["issue_id"]: r["status"] for r in rows}
+            decisions: Dict[str, str] = {}
+            for r in rows:
+                sig = f"{r['issue_id']}_{r['original']}_{r['replacement']}"
+                decisions[sig] = r["status"]
+                decisions[r["issue_id"]] = r["status"]
+            return decisions
 
     def _row_to_chapter(self, row: sqlite3.Row) -> Chapter:
         warnings = []

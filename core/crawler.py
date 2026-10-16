@@ -205,15 +205,19 @@ class NetworkCrawler:
         story = self.storage.get_or_create_story(url=story_url)
 
         visited_urls: Set[str] = set()
+        seen_content_hashes: Set[str] = set()
         current_url = SourceParser._resolve_url(start_chapter_url, base_url=story_url)
         current_num = start_chap_num
         total_to_fetch = end_chap_num - start_chap_num + 1
-        fetched_count = 0
+        cached_count = 0
+        downloaded_count = 0
         stop_reason: Optional[str] = None
+        status_category: str = "completed"
 
         while current_num <= end_chap_num:
             if self._is_stopped:
                 stop_reason = "Đã dừng thu thập theo yêu cầu người dùng."
+                status_category = "stopped_by_user"
                 log("WARNING", f"[DỪNG] {stop_reason}")
                 break
 
@@ -225,12 +229,14 @@ class NetworkCrawler:
             # Kiểm tra nếu mất liên kết URL chương tiếp theo
             if not current_url:
                 stop_reason = f"Thiếu liên kết để tải Chương {current_num} (chương trước không cung cấp liên kết kế tiếp)."
+                status_category = "incomplete"
                 log("WARNING", f"[DỪNG] {stop_reason}")
                 break
 
             # Phát hiện vòng lặp URL (kiểm tra trước resume để chặn đứng vòng lặp kể cả khi dữ liệu đã có trong CSDL)
             if current_url in visited_urls:
                 stop_reason = f"Phát hiện vòng lặp URL đã xử lý: {current_url}. Dừng lại để tránh lặp vô tận."
+                status_category = "incomplete"
                 log("ERROR", f"[DỪNG] {stop_reason}")
                 break
             visited_urls.add(current_url)
@@ -243,17 +249,57 @@ class NetworkCrawler:
             if existing_chap and existing_chap.status in ("verified", "downloaded") and existing_chap.raw_content:
                 chap_display_num = existing_chap.chapter_num or current_num
                 log("INFO", f"[BỎ QUA] Chương {chap_display_num} đã có trong CSDL (Khôi phục tiến độ). Bỏ qua không tải lại.")
+                if existing_chap.content_hash:
+                    seen_content_hashes.add(existing_chap.content_hash)
 
                 # Chuẩn hóa existing_chap.next_url để tránh dính file:// hoặc path tương đối
                 cand_next = existing_chap.next_url or ""
                 if cand_next:
                     cand_next = SourceParser._resolve_url(cand_next, current_url=current_url, base_url=story_url)
 
+                # Nếu cần tải tiếp (chưa tới end_chap_num) mà bản lưu lại thiếu next_url:
+                # Không được coi là đủ dữ liệu; tiến hành tải lại trang chương hiện tại để khôi phục điều hướng
+                if chap_display_num < end_chap_num and (not cand_next or not cand_next.strip()):
+                    refetch_url = (
+                        existing_chap.source_url
+                        if (existing_chap.source_url and existing_chap.source_url.startswith("http"))
+                        else (current_url if current_url.startswith("http") else "")
+                    )
+                    if refetch_url:
+                        log("INFO", f"Chương {chap_display_num} trong CSDL thiếu liên kết kế tiếp. Đang tải lại '{refetch_url}' để khôi phục điều hướng...")
+                        re_html, re_err, re_status, re_diag = self.fetch_url(refetch_url, story_url=story_url)
+                        if re_status in (403, 429):
+                            stop_reason = f"Máy chủ trả về HTTP {re_status} khi tải lại Chương {chap_display_num} để khôi phục điều hướng."
+                            status_category = "blocked"
+                            log("ERROR", f"[DỪNG] {stop_reason}")
+                            break
+                        if re_err:
+                            stop_reason = f"Lỗi tải lại trang Chương {chap_display_num} để khôi phục điều hướng: {re_err}"
+                            status_category = "network_error"
+                            log("ERROR", f"[DỪNG] {stop_reason}")
+                            break
+                        if re_html:
+                            re_refetch = re_diag.get("final_url", refetch_url)
+                            re_parsed = SourceParser.parse_chapter_html(re_html, current_url=re_refetch, base_url=story_url)
+                            rec_next = re_parsed.get("next_url", "")
+                            if rec_next:
+                                cand_next = SourceParser._resolve_url(rec_next, current_url=re_refetch, base_url=story_url)
+                                if existing_chap.id:
+                                    self.storage.update_chapter_navigation(existing_chap.id, next_url=cand_next)
+                                log("SUCCESS", f"Đã khôi phục thành công liên kết kế tiếp từ trang mạng: {cand_next} (Nguồn: {re_parsed.get('next_source', 'web')})")
+
+                if chap_display_num < end_chap_num and (not cand_next or not cand_next.strip()):
+                    stop_reason = f"Không tìm thấy liên kết chương tiếp theo sau Chương {chap_display_num} (bản lưu thiếu liên kết và tải lại trang không tìm thấy)."
+                    status_category = "incomplete"
+                    log("WARNING", f"[DỪNG] {stop_reason}")
+                    cached_count += 1
+                    break
+
                 current_url = cand_next
                 current_num = chap_display_num + 1
-                fetched_count += 1
+                cached_count += 1
                 if on_progress:
-                    on_progress(fetched_count, total_to_fetch, f"Đã có: Chương {chap_display_num}")
+                    on_progress(cached_count + downloaded_count, total_to_fetch, f"Đã có: Chương {chap_display_num}")
                 continue
 
             # Tải qua mạng
@@ -271,7 +317,16 @@ class NetworkCrawler:
             ))
 
             if err:
-                stop_reason = f"Lỗi tải tại Chương {current_num} ({current_url}): {err}"
+                if status_code in (403, 429) or "cloudflare" in err.lower() or "captcha" in err.lower():
+                    status_category = "blocked"
+                    stop_reason = f"Bị chặn truy cập (HTTP {status_code}) tại Chương {current_num} ({current_url}): {err}"
+                elif any(k in err.lower() for k in ["thời gian chờ", "kết nối mạng", "timed out", "timeout", "connection"]):
+                    status_category = "network_error"
+                    stop_reason = f"Lỗi kết nối mạng tại Chương {current_num} ({current_url}): {err}"
+                else:
+                    status_category = "network_error" if (status_code == 0 or status_code is None) else "incomplete"
+                    stop_reason = f"Lỗi tải tại Chương {current_num} ({current_url}): {err}"
+
                 log("ERROR", f"[DỪNG] {stop_reason}")
                 # Lưu trạng thái thất bại vào DB để theo dõi
                 failed_chap = Chapter(
@@ -294,6 +349,7 @@ class NetworkCrawler:
             )
             if "error" in parsed:
                 stop_reason = f"Phân tích thất bại tại Chương {current_num}: {parsed['error']}"
+                status_category = "parse_error"
                 log("ERROR", f"[DỪNG] {stop_reason}")
                 break
 
@@ -303,6 +359,32 @@ class NetworkCrawler:
             char_count = len(parsed["raw_content"])
             next_url = parsed["next_url"]
             next_source = parsed.get("next_source", "none")
+            content_hash = parsed["content_hash"]
+
+            # Kiểm tra nội dung rỗng hoặc trang không hợp lệ (Không đánh dấu verified)
+            if not parsed["raw_content"].strip() or para_count == 0:
+                stop_reason = f"Phát hiện nội dung rỗng hoặc trang không hợp lệ tại Chương {current_num} ({current_url})."
+                status_category = "parse_error"
+                log("ERROR", f"[DỪNG] {stop_reason}")
+                failed_chap = Chapter(
+                    story_id=story.id,
+                    chapter_num=current_num,
+                    chapter_title=f"Chương {current_num} (Nội dung rỗng/lỗi)",
+                    source_url=current_url,
+                    raw_content="",
+                    status="failed",
+                    warnings=[stop_reason],
+                )
+                self.storage.save_chapter(failed_chap)
+                break
+
+            # Phát hiện nội dung trùng lặp bất thường (chuyển hướng ngầm hoặc trang lỗi)
+            if content_hash in seen_content_hashes:
+                stop_reason = f"Phát hiện nội dung trùng lặp bất thường với chương đã tải trước đó (SHA256: {content_hash[:8]}...). Trang có thể bị lặp hoặc chuyển hướng ngầm."
+                status_category = "incomplete"
+                log("ERROR", f"[DỪNG] {stop_reason}")
+                break
+            seen_content_hashes.add(content_hash)
 
             # Ghi log chẩn đoán nội dung trích xuất và nguồn liên kết
             log("INFO", (
@@ -318,7 +400,7 @@ class NetworkCrawler:
                 chapter_title=parsed["chapter_title"] or f"Chương {chap_num}",
                 source_url=current_url,
                 raw_content=parsed["raw_content"],
-                content_hash=parsed["content_hash"],
+                content_hash=content_hash,
                 status="verified",
                 prev_url=parsed["prev_url"],
                 next_url=next_url,
@@ -326,14 +408,14 @@ class NetworkCrawler:
             )
 
             self.storage.save_chapter(chapter)
-            log("SUCCESS", f"Đã lưu Chương {chap_num}: '{chapter.chapter_title}' ({para_count} đoạn, SHA256: {chapter.content_hash[:8]}...)")
+            log("SUCCESS", f"Đã lưu Chương {chap_num}: '{chapter.chapter_title}' ({para_count} đoạn, SHA256: {content_hash[:8]}...)")
 
             if on_chapter_saved:
                 on_chapter_saved(chapter)
 
-            fetched_count += 1
+            downloaded_count += 1
             if on_progress:
-                on_progress(fetched_count, total_to_fetch, f"Hoàn thành Chương {chap_num}")
+                on_progress(cached_count + downloaded_count, total_to_fetch, f"Hoàn thành Chương {chap_num}")
 
             # Đã đạt đến số chương kết thúc mong muốn
             if chap_num >= end_chap_num:
@@ -343,6 +425,7 @@ class NetworkCrawler:
             # Kiểm tra liên kết tiếp theo cho chương tiếp theo
             if not next_url:
                 stop_reason = f"Thiếu liên kết chương tiếp theo sau Chương {chap_num}. Không thể tải Chương {chap_num + 1}."
+                status_category = "incomplete"
                 log("WARNING", f"[DỪNG] {stop_reason}")
                 break
 
@@ -352,17 +435,31 @@ class NetworkCrawler:
             # Tạm nghỉ delay tôn trọng máy chủ
             time.sleep(self.delay_seconds)
 
-        is_success = (fetched_count == total_to_fetch)
-        if is_success:
-            status_msg = f"Hoàn thành thu thập đủ: {fetched_count}/{total_to_fetch} chương."
+        fetched_count = cached_count + downloaded_count
+        missing_count = max(0, total_to_fetch - fetched_count)
+        is_completed = (fetched_count >= total_to_fetch and missing_count == 0)
+
+        if is_completed:
+            status_category = "completed"
+            status_msg = f"Hoàn tất thu thập đủ: {fetched_count}/{total_to_fetch} chương (Tải mới: {downloaded_count}, Từ cache: {cached_count})."
             log("SUCCESS", status_msg)
         else:
-            status_msg = f"Chưa hoàn tất: {fetched_count}/{total_to_fetch} chương. Lý do: {stop_reason or 'Tác vụ dừng sớm hơn yêu cầu.'}"
+            if not status_category or status_category == "completed":
+                status_category = "incomplete"
+            status_msg = (
+                f"Chưa hoàn tất: {fetched_count}/{total_to_fetch} chương "
+                f"(Tải mới: {downloaded_count}, Từ cache: {cached_count}, Còn thiếu: {missing_count}). "
+                f"Lý do: {stop_reason or 'Tác vụ dừng sớm hơn yêu cầu.'}"
+            )
             log("WARNING", status_msg)
 
         return {
-            "success": is_success,
+            "success": is_completed,
+            "status": status_category,
             "fetched_count": fetched_count,
+            "cached_count": cached_count,
+            "downloaded_count": downloaded_count,
+            "missing_count": missing_count,
             "total_requested": total_to_fetch,
             "start_chap": start_chap_num,
             "end_chap": end_chap_num,
