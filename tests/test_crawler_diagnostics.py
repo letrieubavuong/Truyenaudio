@@ -413,6 +413,78 @@ class TestCrawlerDiagnostics(unittest.TestCase):
         all_chaps = self.storage.get_chapters_range(story.id, 1, 12)
         self.assertEqual(len(all_chaps), 12)
 
+    def test_out_of_order_retrospective_chapter_crawl_past_450(self):
+        """9. Xử lý website chèn chương hồi tố ngoài thứ tự (như Chương 426 nằm giữa 449 và 450)."""
+        story = self.storage.get_or_create_story(self.story_url)
+
+        # Giả lập CSDL đã có chương 448, 449 và chương hồi tố 426
+        ch448 = Chapter(
+            story_id=story.id,
+            chapter_num=448,
+            chapter_title="Chương 448: Tiểu Thạch Sơn",
+            source_url="https://vivutruyen.com/truyen/pham-nhan-tu-tien/chuong-448-slug-103930",
+            raw_content="Nội dung chương 448",
+            status="verified",
+            next_url="https://vivutruyen.com/truyen/pham-nhan-tu-tien/chuong-449-slug-103931",
+        )
+        ch449 = Chapter(
+            story_id=story.id,
+            chapter_num=449,
+            chapter_title="Chương 449: Ám Kế",
+            source_url="https://vivutruyen.com/truyen/pham-nhan-tu-tien/chuong-449-slug-103931",
+            raw_content="Nội dung chương 449",
+            status="verified",
+            next_url="https://vivutruyen.com/truyen/pham-nhan-tu-tien/chuong-426-slug-103932",
+        )
+        ch426 = Chapter(
+            story_id=story.id,
+            chapter_num=426,
+            chapter_title="Chương 426: Quỷ Trá",
+            source_url="https://vivutruyen.com/truyen/pham-nhan-tu-tien/chuong-426-slug-103932",
+            raw_content="Nội dung chương 426 chèn bù",
+            status="verified",
+            next_url="https://vivutruyen.com/truyen/pham-nhan-tu-tien/chuong-450-slug-103933",
+        )
+        self.storage.save_chapter(ch448)
+        self.storage.save_chapter(ch449)
+        self.storage.save_chapter(ch426)
+
+        # Giả lập web phản hồi chương 450 và 451
+        url_450 = "https://vivutruyen.com/truyen/pham-nhan-tu-tien/chuong-450-slug-103933"
+        url_451 = "https://vivutruyen.com/truyen/pham-nhan-tu-tien/chuong-451-slug-103934"
+        url_map = {
+            url_450: make_mock_html(450, "Chương 450: Hiện Hình", next_url="/truyen/pham-nhan-tu-tien/chuong-451-slug-103934"),
+            url_451: make_mock_html(451, "Chương 451: Phiên Kiểm", next_url=""),
+        }
+
+        def mock_get(url, **kwargs):
+            self.assertIn(url, url_map)
+            return self._create_mock_response(url_map[url], status_code=200, url=url)
+
+        with patch.object(self.crawler.session, "get", side_effect=mock_get):
+            # Crawl từ 449 đến 451 bắt đầu từ URL của chương 449
+            res = self.crawler.crawl_range(
+                story_url=self.story_url,
+                start_chapter_url=ch449.source_url,
+                start_chap_num=449,
+                end_chap_num=451,
+            )
+
+        self.assertTrue(res["success"])
+        self.assertEqual(res["status"], "completed")
+        self.assertEqual(res["downloaded_count"], 2)  # Tải mới 450 và 451
+        self.assertEqual(res["cached_count"], 1)      # Chương 449 từ cache (426 < 449 nên được tua qua)
+        self.assertIsNone(res["stop_reason"])
+
+        # Kiểm tra Chương 450 và 451 đã được lưu vào CSDL
+        saved_450 = self.storage.get_chapter_by_url(url_450)
+        self.assertIsNotNone(saved_450)
+        self.assertEqual(saved_450.chapter_num, 450)
+
+        saved_451 = self.storage.get_chapter_by_url(url_451)
+        self.assertIsNotNone(saved_451)
+        self.assertEqual(saved_451.chapter_num, 451)
+
 
 if __name__ == "__main__":
     unittest.main()

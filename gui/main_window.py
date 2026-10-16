@@ -86,6 +86,7 @@ class MainWindow(QMainWindow):
         self.spin_start_chap.setRange(1, 99999)
         self.spin_start_chap.setValue(1)
         self.spin_start_chap.setToolTip("Khoảng tải: Chương bắt đầu thu thập từ nguồn")
+        self.spin_start_chap.valueChanged.connect(self.on_start_chap_changed)
         cfg_layout.addWidget(self.spin_start_chap, 0, 1)
 
         cfg_layout.addWidget(QLabel("Chương kết thúc:"), 0, 2)
@@ -294,6 +295,12 @@ class MainWindow(QMainWindow):
         """Lưu lại quyết định duyệt vào SQLite để bảo toàn tiến độ."""
         self.storage.save_review_decisions(self.current_story_id, issues)
 
+    def on_start_chap_changed(self, val: int):
+        if hasattr(self, "storage") and self.storage:
+            ch = self.storage.get_chapter_by_num(self.current_story_id, val)
+            if ch and ch.source_url and ch.source_url.startswith("http"):
+                self.txt_start_url.setText(ch.source_url)
+
     def start_process(self):
         start_chap = self.spin_start_chap.value()
         end_chap = self.spin_end_chap.value()
@@ -317,10 +324,16 @@ class MainWindow(QMainWindow):
         do_download = self.chk_download.isChecked()
 
         if do_download:
+            req_start_url = self.txt_start_url.text().strip()
+            if start_chap > 1 and "chuong-1-" in req_start_url:
+                target_chap = self.storage.get_chapter_by_num(self.current_story_id, start_chap)
+                if target_chap and target_chap.source_url and target_chap.source_url.startswith("http"):
+                    req_start_url = target_chap.source_url
+
             self.crawl_worker = CrawlWorker(
                 storage=self.storage,
                 story_url=self.txt_story_url.text().strip(),
-                start_url=self.txt_start_url.text().strip(),
+                start_url=req_start_url,
                 start_chap=start_chap,
                 end_chap=end_chap,
                 import_dir=self.offline_import_dir,

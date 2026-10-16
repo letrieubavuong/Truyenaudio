@@ -9,6 +9,7 @@ Features:
 - Loop detection (tracks visited URLs)
 - SQLite resumption: checks if chapter is already verified before fetching
 """
+import re
 import time
 import requests
 from typing import Optional, Callable, Dict, Any, Set, Tuple
@@ -213,6 +214,15 @@ class NetworkCrawler:
         downloaded_count = 0
         stop_reason: Optional[str] = None
         status_category: str = "completed"
+        last_processed_chap_num: Optional[int] = None
+
+        # Nếu start_chap_num > 1 và URL bắt đầu truyền vào là chương 1 (hoặc mặc định),
+        # kiểm tra xem CSDL đã có URL trực tiếp của start_chap_num không để tối ưu điểm xuất phát
+        if start_chap_num > 1 and current_url and ("chuong-1-" in current_url or "c-1" in current_url):
+            target_chap = self.storage.get_chapter_by_num(story.id, start_chap_num)
+            if target_chap and target_chap.source_url and target_chap.source_url.startswith("http"):
+                current_url = target_chap.source_url
+                log("INFO", f"Tự động điều chỉnh URL bắt đầu tới Chương {start_chap_num} từ CSDL: {current_url}")
 
         while current_num <= end_chap_num:
             if self._is_stopped:
@@ -243,12 +253,21 @@ class NetworkCrawler:
 
             # Kiểm tra CSDL xem chương đã tải chưa (Resume)
             existing_chap = self.storage.get_chapter_by_url(current_url)
-            if not existing_chap and current_num:
-                existing_chap = self.storage.get_chapter_by_num(story.id, current_num)
+            if not existing_chap:
+                # Trích xuất số chương từ URL (ví dụ: chuong-1, c-1)
+                m_num = re.search(r"(?:chuong|c)[-_](\d+)", current_url, re.IGNORECASE)
+                cand_chap_num = int(m_num.group(1)) if m_num else current_num
+                if cand_chap_num:
+                    cand_chap = self.storage.get_chapter_by_num(story.id, cand_chap_num)
+                    if cand_chap:
+                        is_offline = not cand_chap.source_url or not cand_chap.source_url.startswith("http")
+                        same_slug = bool(m_num and cand_chap.source_url and f"chuong-{cand_chap_num}" in cand_chap.source_url.lower())
+                        if is_offline or same_slug:
+                            existing_chap = cand_chap
 
             if existing_chap and existing_chap.status in ("verified", "downloaded") and existing_chap.raw_content:
                 chap_display_num = existing_chap.chapter_num or current_num
-                log("INFO", f"[BỎ QUA] Chương {chap_display_num} đã có trong CSDL (Khôi phục tiến độ). Bỏ qua không tải lại.")
+                last_processed_chap_num = chap_display_num
                 if existing_chap.content_hash:
                     seen_content_hashes.add(existing_chap.content_hash)
 
@@ -259,7 +278,8 @@ class NetworkCrawler:
 
                 # Nếu cần tải tiếp (chưa tới end_chap_num) mà bản lưu lại thiếu next_url:
                 # Không được coi là đủ dữ liệu; tiến hành tải lại trang chương hiện tại để khôi phục điều hướng
-                if chap_display_num < end_chap_num and (not cand_next or not cand_next.strip()):
+                needs_more = (chap_display_num < end_chap_num or current_num < end_chap_num)
+                if needs_more and (not cand_next or not cand_next.strip()):
                     refetch_url = (
                         existing_chap.source_url
                         if (existing_chap.source_url and existing_chap.source_url.startswith("http"))
@@ -288,18 +308,30 @@ class NetworkCrawler:
                                     self.storage.update_chapter_navigation(existing_chap.id, next_url=cand_next)
                                 log("SUCCESS", f"Đã khôi phục thành công liên kết kế tiếp từ trang mạng: {cand_next} (Nguồn: {re_parsed.get('next_source', 'web')})")
 
-                if chap_display_num < end_chap_num and (not cand_next or not cand_next.strip()):
+                if needs_more and (not cand_next or not cand_next.strip()):
                     stop_reason = f"Không tìm thấy liên kết chương tiếp theo sau Chương {chap_display_num} (bản lưu thiếu liên kết và tải lại trang không tìm thấy)."
                     status_category = "incomplete"
                     log("WARNING", f"[DỪNG] {stop_reason}")
-                    cached_count += 1
+                    if chap_display_num >= start_chap_num:
+                        cached_count += 1
                     break
 
                 current_url = cand_next
-                current_num = chap_display_num + 1
-                cached_count += 1
-                if on_progress:
-                    on_progress(cached_count + downloaded_count, total_to_fetch, f"Đã có: Chương {chap_display_num}")
+
+                # Phân biệt giữa chương trong dải [start_chap_num, end_chap_num]
+                # và chương nằm trước dải cần tải (tua nhanh qua cache để đến điểm xuất phát)
+                if chap_display_num >= start_chap_num:
+                    log("INFO", f"[BỎ QUA] Chương {chap_display_num} đã có trong CSDL (Khôi phục tiến độ). Bỏ qua không tải lại.")
+                    cached_count += 1
+                    current_num = max(current_num, chap_display_num + 1)
+                    if on_progress:
+                        on_progress(cached_count + downloaded_count, total_to_fetch, f"Đã có: Chương {chap_display_num}")
+                else:
+                    log("INFO", f"[TUA NHANH] Chương {chap_display_num} đã có trong CSDL (Đang tìm tới Chương {start_chap_num}).")
+                    current_num = max(start_chap_num, chap_display_num + 1)
+                    if on_progress:
+                        on_progress(cached_count + downloaded_count, total_to_fetch, f"Đang tua tới Chương {start_chap_num}...")
+
                 continue
 
             # Tải qua mạng
@@ -414,6 +446,7 @@ class NetworkCrawler:
                 on_chapter_saved(chapter)
 
             downloaded_count += 1
+            last_processed_chap_num = chap_num
             if on_progress:
                 on_progress(cached_count + downloaded_count, total_to_fetch, f"Hoàn thành Chương {chap_num}")
 
@@ -430,14 +463,20 @@ class NetworkCrawler:
                 break
 
             current_url = next_url
-            current_num = chap_num + 1
+            current_num = max(current_num, chap_num + 1)
 
             # Tạm nghỉ delay tôn trọng máy chủ
             time.sleep(self.delay_seconds)
 
         fetched_count = cached_count + downloaded_count
         missing_count = max(0, total_to_fetch - fetched_count)
-        is_completed = (fetched_count >= total_to_fetch and missing_count == 0)
+        has_reached_end = (downloaded_count > 0 or cached_count > 0) and (
+            (last_processed_chap_num is not None and last_processed_chap_num >= end_chap_num)
+            or current_num > end_chap_num
+        )
+        is_completed = (status_category == "completed") and (
+            (fetched_count >= total_to_fetch and missing_count == 0) or has_reached_end
+        )
 
         if is_completed:
             status_category = "completed"
