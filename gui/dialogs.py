@@ -21,8 +21,9 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Cài đặt hệ thống & Từ điển")
         self.resize(750, 550)
-        self.dict_path = dict_path
-        self.terms_path = terms_path
+        from core.utils import get_resource_path
+        self.dict_path = get_resource_path(dict_path)
+        self.terms_path = get_resource_path(terms_path)
 
         self.init_ui()
         self.load_settings()

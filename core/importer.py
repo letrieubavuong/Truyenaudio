@@ -5,10 +5,10 @@ Extracts chapters, verifies integrity, sorts, and stores into SQLite.
 """
 import os
 import re
-from typing import List, Dict, Any, Optional, Callable
 from core.models import Chapter, StoryInfo
 from core.parser import SourceParser
 from core.storage import StorageManager
+from core.profiles import get_profile
 
 
 class OfflineImporter:
@@ -18,8 +18,8 @@ class OfflineImporter:
     def import_directory(
         self,
         directory_path: str,
-        story_url: str = "offline://local-story",
-        story_title: str = "Phàm Nhân Tu Tiên",
+        story_url: str = "",
+        story_title: str = "",
         on_progress: Optional[Callable[[int, int, str], None]] = None,
         on_log: Optional[Callable[[str, str], None]] = None,
     ) -> List[Chapter]:
@@ -34,7 +34,12 @@ class OfflineImporter:
             log("ERROR", f"Thư mục không tồn tại: {directory_path}")
             return []
 
-        story = self.storage.get_or_create_story(url=story_url, title=story_title)
+        profile = get_profile(story_url or story_title or "pham-nhan-tu-tien")
+        final_url = story_url or profile.story_url
+        final_title = story_title or profile.title
+        final_author = profile.author
+
+        story = self.storage.get_or_create_story(url=final_url, title=final_title, author=final_author)
 
         # Lấy danh sách file được hỗ trợ
         supported_exts = (".html", ".htm", ".txt")

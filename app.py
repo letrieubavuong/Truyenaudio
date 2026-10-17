@@ -33,7 +33,8 @@ def main():
         app.setFont(default_font)
 
     # Nạp stylesheet nền sáng hiện đại
-    qss_path = os.path.join(os.path.dirname(__file__), "resources", "styles.qss")
+    from core.utils import get_resource_path
+    qss_path = get_resource_path("resources/styles.qss")
     if os.path.exists(qss_path):
         try:
             with open(qss_path, "r", encoding="utf-8") as f:

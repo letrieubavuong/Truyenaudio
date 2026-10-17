@@ -10,30 +10,35 @@ from typing import List, Dict, Any, Optional
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QSpinBox, QCheckBox, QTabWidget, QProgressBar, QTextEdit,
-    QFileDialog, QMessageBox, QGroupBox, QGridLayout, QStatusBar
+    QFileDialog, QMessageBox, QGroupBox, QGridLayout, QStatusBar, QComboBox
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon, QFont
 
 from core.storage import StorageManager
 from core.models import Chapter, Volume, SpellIssue
+from core.profiles import STORY_PROFILES, get_profile, list_profiles, StoryProfile
 from core.spellchecker import VietnameseSpellChecker
 from core.ai_checker import AIChecker
 from core.merger import VolumeMerger
 from gui.widgets import ChapterTableWidget, DiffReviewWidget
 from gui.dialogs import SettingsDialog
 from gui.workers import CrawlWorker, SpellCheckWorker, ExportWorker
+from gui.video_tab import VideoProductionTab
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Bộ Thu Thập, Hiệu Đính & Gộp Tập Truyện - Phàm Nhân Tu Tiên")
-        self.resize(1180, 820)
-        self.setMinimumSize(950, 680)
+        self.current_profile: StoryProfile = get_profile("pham-nhan-tu-tien")
+        self.setWindowTitle(f"Bộ Thu Thập, Hiệu Đính & Gộp Tập Truyện - {self.current_profile.title}")
+        self.resize(1200, 840)
+        self.setMinimumSize(980, 700)
 
         self.storage = StorageManager("crawler_state.db")
-        self.spell_checker = VietnameseSpellChecker()
+        self.spell_checker = VietnameseSpellChecker(
+            protected_terms_path=self.current_profile.protected_terms_file
+        )
         self.ai_checker = AIChecker(protected_terms=self.spell_checker.protected_terms)
 
         self.crawl_worker: Optional[CrawlWorker] = None
@@ -41,7 +46,7 @@ class MainWindow(QMainWindow):
         self.export_worker: Optional[ExportWorker] = None
 
         self.offline_import_dir: str = ""
-        self.current_story_id: int = self.storage.get_default_story_id()
+        self.current_story_id: int = 1
         self.current_volumes: List[Volume] = []
         self.current_merger: Optional[VolumeMerger] = None
 
@@ -59,21 +64,28 @@ class MainWindow(QMainWindow):
         top_group = QGroupBox("1. Nguồn Dữ Liệu & Phương Thức Thu Thập")
         top_layout = QGridLayout(top_group)
 
-        top_layout.addWidget(QLabel("URL Truyện:"), 0, 0)
-        self.txt_story_url = QLineEdit("https://vivutruyen.com/truyen/pham-nhan-tu-tien")
-        top_layout.addWidget(self.txt_story_url, 0, 1, 1, 3)
+        top_layout.addWidget(QLabel("<b>Bộ truyện & Nguồn:</b>"), 0, 0)
+        self.combo_story = QComboBox()
+        self.combo_story.addItem("Phàm Nhân Tu Tiên – vivutruyen.com", "pham-nhan-tu-tien")
+        self.combo_story.addItem("Tiên Nghịch – webnovel.vn", "tien-nghich")
+        self.combo_story.currentIndexChanged.connect(self.on_story_changed)
+        top_layout.addWidget(self.combo_story, 0, 1, 1, 3)
 
-        top_layout.addWidget(QLabel("URL Chương bắt đầu:"), 1, 0)
-        self.txt_start_url = QLineEdit("https://vivutruyen.com/truyen/pham-nhan-tu-tien/chuong-1-son-bien-tieu-thon-103484")
-        top_layout.addWidget(self.txt_start_url, 1, 1, 1, 2)
+        top_layout.addWidget(QLabel("URL Truyện:"), 1, 0)
+        self.txt_story_url = QLineEdit(self.current_profile.story_url)
+        top_layout.addWidget(self.txt_story_url, 1, 1, 1, 3)
+
+        top_layout.addWidget(QLabel("URL Chương bắt đầu:"), 2, 0)
+        self.txt_start_url = QLineEdit(self.current_profile.start_chapter_url)
+        top_layout.addWidget(self.txt_start_url, 2, 1, 1, 2)
 
         self.btn_select_import_dir = QPushButton("📁 Nạp tệp máy tính (Offline)...")
         self.btn_select_import_dir.clicked.connect(self.choose_import_dir)
-        top_layout.addWidget(self.btn_select_import_dir, 1, 3)
+        top_layout.addWidget(self.btn_select_import_dir, 2, 3)
 
         self.lbl_import_hint = QLabel("<i>Đang dùng: Tải trực tiếp qua mạng</i>")
         self.lbl_import_hint.setStyleSheet("color: #555;")
-        top_layout.addWidget(self.lbl_import_hint, 2, 1, 1, 3)
+        top_layout.addWidget(self.lbl_import_hint, 3, 1, 1, 3)
 
         main_layout.addWidget(top_group)
 
@@ -110,7 +122,7 @@ class MainWindow(QMainWindow):
         cfg_layout.addWidget(self.spin_start_vol, 0, 7)
 
         cfg_layout.addWidget(QLabel("Thư mục xuất:"), 1, 0)
-        self.txt_output_dir = QLineEdit(os.path.abspath("output_volumes"))
+        self.txt_output_dir = QLineEdit(os.path.abspath(self.current_profile.default_output_dir))
         cfg_layout.addWidget(self.txt_output_dir, 1, 1, 1, 5)
 
         self.btn_choose_out = QPushButton("Chọn thư mục...")
@@ -238,6 +250,11 @@ class MainWindow(QMainWindow):
 
         self.tabs_main.addTab(tab3_widget, "📊 Báo Cáo Markdown")
 
+        # Tab 4: Sản Xuất Video
+        self.video_tab = VideoProductionTab()
+        self.video_tab.log_requested.connect(self.log)
+        self.tabs_main.addTab(self.video_tab, "🎬 Sản Xuất Video")
+
         main_layout.addWidget(self.tabs_main, 1)
 
         # Status Bar
@@ -246,16 +263,46 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage("Sẵn sàng hoạt động.")
 
     def load_initial_data(self):
-        """Nạp danh sách chương hiện có trong SQLite lên bảng hiển thị."""
+        """Nạp danh sách chương hiện có trong SQLite lên bảng hiển thị theo hồ sơ truyện đang chọn."""
         story_info = self.storage.get_or_create_story(
-            url=self.txt_story_url.text().strip(),
-            title="Phàm Nhân Tu Tiên"
+            url=self.current_profile.story_url,
+            title=self.current_profile.title,
+            author=self.current_profile.author,
         )
         self.current_story_id = story_info.id or 1
         chapters = self.storage.get_all_chapters(story_id=self.current_story_id)
         self.table_chapters.update_chapters(chapters)
         if chapters:
-            self.log("INFO", f"Đã nạp {len(chapters)} chương từ CSDL lưu trữ SQLite (Story ID: {self.current_story_id}).")
+            self.log("INFO", f"Đã nạp {len(chapters)} chương từ CSDL lưu trữ SQLite ({self.current_profile.title}, Story ID: {self.current_story_id}).")
+
+    def on_story_changed(self, idx: int):
+        """Xử lý khi người dùng đổi truyện / nguồn giữa Phàm Nhân Tu Tiên và Tiên Nghịch."""
+        key = self.combo_story.currentData()
+        self.current_profile = get_profile(key)
+        self.setWindowTitle(f"Bộ Thu Thập, Hiệu Đính & Gộp Tập Truyện - {self.current_profile.title}")
+        self.txt_story_url.setText(self.current_profile.story_url)
+        self.txt_start_url.setText(self.current_profile.start_chapter_url)
+        self.txt_output_dir.setText(os.path.abspath(self.current_profile.default_output_dir))
+
+        if self.current_profile.protected_terms_file:
+            self.spell_checker.set_protected_terms_path(self.current_profile.protected_terms_file)
+            self.ai_checker.set_protected_terms(self.spell_checker.protected_terms)
+
+        story_info = self.storage.get_or_create_story(
+            url=self.current_profile.story_url,
+            title=self.current_profile.title,
+            author=self.current_profile.author,
+        )
+        self.current_story_id = story_info.id or 1
+        self.current_volumes = []
+        self.btn_export.setEnabled(False)
+
+        chapters = self.storage.get_all_chapters(story_id=self.current_story_id)
+        self.table_chapters.update_chapters(chapters)
+        self.log(
+            "INFO",
+            f"Đã chuyển sang truyện: {self.current_profile.title} (Nguồn: {self.current_profile.source_domain}, CSDL có {len(chapters)} chương)."
+        )
 
     def log(self, level: str, msg: str):
         color_map = {
@@ -289,7 +336,8 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Thư mục không tồn tại", f"Thư mục '{folder}' chưa được tạo.")
 
     def open_settings(self):
-        dlg = SettingsDialog(self)
+        terms_file = self.current_profile.protected_terms_file if hasattr(self, "current_profile") else "resources/protected_terms.json"
+        dlg = SettingsDialog(self, terms_path=terms_file)
         if dlg.exec():
             self.spell_checker.load_resources()
             self.ai_checker.set_protected_terms(self.spell_checker.protected_terms)
@@ -314,7 +362,8 @@ class MainWindow(QMainWindow):
 
         story_info = self.storage.get_or_create_story(
             url=self.txt_story_url.text().strip(),
-            title="Phàm Nhân Tu Tiên"
+            title=self.current_profile.title,
+            author=self.current_profile.author,
         )
         self.current_story_id = story_info.id or 1
 
@@ -329,7 +378,7 @@ class MainWindow(QMainWindow):
 
         if do_download:
             req_start_url = self.txt_start_url.text().strip()
-            if start_chap > 1 and "chuong-1-" in req_start_url:
+            if start_chap > 1 and ("chuong-1-" in req_start_url or "chuong-1/" in req_start_url):
                 target_chap = self.storage.get_chapter_by_num(self.current_story_id, start_chap)
                 if target_chap and target_chap.source_url and target_chap.source_url.startswith("http"):
                     req_start_url = target_chap.source_url
@@ -341,6 +390,7 @@ class MainWindow(QMainWindow):
                 start_chap=start_chap,
                 end_chap=end_chap,
                 import_dir=self.offline_import_dir,
+                story_title=self.current_profile.title,
             )
             self.crawl_worker.progress_changed.connect(self.on_progress)
             self.crawl_worker.log_message.connect(self.log)
@@ -430,6 +480,7 @@ class MainWindow(QMainWindow):
         merger = VolumeMerger(
             chapters_per_volume=self.spin_per_vol.value(),
             allow_partial_last_volume=self.chk_allow_partial.isChecked(),
+            story_profile=self.current_profile,
         )
         self.current_merger = merger
 
@@ -444,6 +495,7 @@ class MainWindow(QMainWindow):
             do_spellcheck=self.chk_spellcheck.isChecked(),
             use_ai=self.chk_use_ai.isChecked(),
             ai_checker=self.ai_checker if self.chk_use_ai.isChecked() else None,
+            story_title=self.current_profile.title,
         )
         self.spell_worker.progress_changed.connect(self.on_progress)
         self.spell_worker.log_message.connect(self.log)
@@ -582,6 +634,21 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         """Dọn dẹp an toàn các worker thread khi người dùng đóng cửa sổ."""
+        # Kiểm tra nếu worker xuất video đang chạy
+        if hasattr(self, "video_tab") and self.video_tab.worker and self.video_tab.worker.isRunning():
+            ans = QMessageBox.question(
+                self,
+                "Tiến trình đang chạy",
+                "Tiến trình xuất video MP4 đang chạy trong nền.\nBạn có muốn hủy tác vụ và đóng ứng dụng ngay không?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            if ans == QMessageBox.No:
+                event.ignore()
+                return
+            self.video_tab.worker.cancel()
+            self.video_tab.worker.wait(2000)
+
         for worker in [self.crawl_worker, self.spell_worker, self.export_worker]:
             if worker and worker.isRunning():
                 if hasattr(worker, "stop"):

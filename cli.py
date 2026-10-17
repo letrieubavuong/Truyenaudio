@@ -21,18 +21,26 @@ from core.spellchecker import VietnameseSpellChecker
 from core.ai_checker import AIChecker
 from core.merger import VolumeMerger
 from core.reporter import ReportGenerator
+from core.profiles import get_profile, list_profiles
 
 
 def get_default_storage():
     return StorageManager("crawler_state.db")
 
 
+def resolve_story_profile(args):
+    target = getattr(args, "story", "") or getattr(args, "title", "") or getattr(args, "story_url", "")
+    return get_profile(target)
+
+
 def resolve_story_id(storage: StorageManager, args) -> int:
     if getattr(args, "story_id", None):
         return args.story_id
-    story_url = getattr(args, "story_url", "") or "https://vivutruyen.com/truyen/pham-nhan-tu-tien"
-    story_title = getattr(args, "title", "") or "Phàm Nhân Tu Tiên"
-    story = storage.get_or_create_story(story_url, story_title)
+    profile = resolve_story_profile(args)
+    story_url = getattr(args, "story_url", "") or profile.story_url
+    story_title = getattr(args, "title", "") or profile.title
+    story_author = profile.author
+    story = storage.get_or_create_story(story_url, story_title, story_author)
     return story.id or 1
 
 
@@ -76,10 +84,14 @@ def cmd_crawl(args):
 
 def cmd_merge(args):
     storage = get_default_storage()
+    profile = resolve_story_profile(args)
     checker = VietnameseSpellChecker()
+    if profile.protected_terms_file:
+        checker.set_protected_terms_path(profile.protected_terms_file)
     merger = VolumeMerger(
         chapters_per_volume=args.per_vol,
         allow_partial_last_volume=args.allow_partial,
+        story_profile=profile,
     )
 
     story_id = resolve_story_id(storage, args)
@@ -101,7 +113,7 @@ def cmd_merge(args):
             protected_terms=checker.protected_terms,
         )
 
-    print(f"[*] Đang xử lý {len(chapters)} chương (Story ID: {story_id}, Sửa chính tả: {do_spellcheck}, AI: {use_ai})...")
+    print(f"[*] Đang xử lý {len(chapters)} chương ({profile.title}, Story ID: {story_id}, Sửa chính tả: {do_spellcheck}, AI: {use_ai})...")
 
     all_issues = []
     edited_paragraphs_map = {}
@@ -138,6 +150,7 @@ def cmd_merge(args):
                 p_issues = [i for i in approved_issues if i.paragraph_idx == p_idx]
                 edited_p = VietnameseSpellChecker.apply_fixes(orig_text, p_issues, approved_only=True)
                 chap_edited_paras.append(edited_p)
+
             edited_paragraphs_map[ch.chapter_num] = chap_edited_paras
         else:
             edited_paragraphs_map[ch.chapter_num] = ch.paragraphs
@@ -147,10 +160,10 @@ def cmd_merge(args):
         start_volume_num=args.start_vol,
         expected_start_chap=args.start_chap,
         expected_end_chap=args.end_chap,
-        story_title=getattr(args, "title", "") or "Phàm Nhân Tu Tiên",
+        story_title=getattr(args, "title", "") or profile.title,
     )
 
-    out_dir = args.out_dir or "output_volumes"
+    out_dir = args.out_dir if (args.out_dir and args.out_dir != "output_volumes") else profile.default_output_dir
     os.makedirs(out_dir, exist_ok=True)
 
     for vol in volumes:
@@ -179,6 +192,7 @@ def cmd_merge(args):
 def cmd_process(args):
     """Quy trình toàn diện: Nạp/Tải -> Phân tích -> Gộp tập -> Báo cáo."""
     storage = get_default_storage()
+    profile = resolve_story_profile(args)
 
     # 1. Thu thập hoặc Nạp offline
     if args.import_dir:
@@ -186,16 +200,18 @@ def cmd_process(args):
         print(f"[*] Đang nạp offline từ: {args.import_dir}")
         importer.import_directory(
             directory_path=args.import_dir,
-            story_url=getattr(args, "story_url", "") or "offline://local-story",
-            story_title=args.title or "Phàm Nhân Tu Tiên",
+            story_url=getattr(args, "story_url", "") or profile.story_url,
+            story_title=getattr(args, "title", "") or profile.title,
             on_log=lambda lvl, msg: print(f"[{lvl}] {msg}"),
         )
     elif args.start_url:
         crawler = NetworkCrawler(storage=storage)
-        print(f"[*] Đang tải trực tiếp từ web: {args.start_url}")
+        start_u = args.start_url or profile.start_chapter_url
+        story_u = args.story_url or profile.story_url
+        print(f"[*] Đang tải trực tiếp từ web: {start_u}")
         res = crawler.crawl_range(
-            story_url=args.story_url or "https://vivutruyen.com/truyen/pham-nhan-tu-tien",
-            start_chapter_url=args.start_url,
+            story_url=story_u,
+            start_chapter_url=start_u,
             start_chap_num=args.start_chap,
             end_chap_num=args.end_chap,
             on_log=lambda lvl, msg: print(f"[{lvl}] {msg}"),
@@ -212,20 +228,22 @@ def cmd_process(args):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Công cụ thu thập, sửa lỗi chính tả tiếng Việt và gộp tập truyện Phàm Nhân Tu Tiên"
+        description="Công cụ thu thập, sửa lỗi chính tả tiếng Việt và gộp tập truyện (Phàm Nhân Tu Tiên, Tiên Nghịch)"
     )
     subparsers = parser.add_subparsers(dest="command", help="Lệnh chức năng")
 
     # Subcommand: import
     p_import = subparsers.add_parser("import", help="Nạp tệp HTML/TXT từ thư mục vào CSDL SQLite")
+    p_import.add_argument("--story", default="", help="Hồ sơ truyện: 'pham-nhan-tu-tien', 'tien-nghich'")
     p_import.add_argument("--dir", required=True, help="Đường dẫn thư mục chứa các tệp HTML/TXT")
     p_import.add_argument("--story-url", default="", help="URL truyện")
-    p_import.add_argument("--title", default="Phàm Nhân Tu Tiên", help="Tên tác phẩm")
+    p_import.add_argument("--title", default="", help="Tên tác phẩm")
 
     # Subcommand: crawl
     p_crawl = subparsers.add_parser("crawl", help="Thu thập chương truyện từ web theo liên kết kế tiếp")
-    p_crawl.add_argument("--story-url", default="https://vivutruyen.com/truyen/pham-nhan-tu-tien", help="URL trang truyện")
-    p_crawl.add_argument("--start-url", required=True, help="URL chương bắt đầu")
+    p_crawl.add_argument("--story", default="", help="Hồ sơ truyện: 'pham-nhan-tu-tien', 'tien-nghich'")
+    p_crawl.add_argument("--story-url", default="", help="URL trang truyện")
+    p_crawl.add_argument("--start-url", default="", help="URL chương bắt đầu")
     p_crawl.add_argument("--start-chap", type=int, default=1, help="Số chương bắt đầu")
     p_crawl.add_argument("--end-chap", type=int, default=12, help="Số chương kết thúc (khoảng tải: start-chap đến end-chap)")
     p_crawl.add_argument("--delay", type=float, default=1.5, help="Thời gian nghỉ giữa các yêu cầu (giây)")
@@ -233,13 +251,14 @@ def main():
 
     # Subcommand: merge
     p_merge = subparsers.add_parser("merge", help="Gộp các chương thành tập TXT và xuất báo cáo")
+    p_merge.add_argument("--story", default="", help="Hồ sơ truyện: 'pham-nhan-tu-tien', 'tien-nghich'")
     p_merge.add_argument("--story-id", type=int, help="ID truyện trong CSDL (mặc định tự phân giải)")
-    p_merge.add_argument("--title", default="Phàm Nhân Tu Tiên", help="Tên truyện")
+    p_merge.add_argument("--title", default="", help="Tên truyện")
     p_merge.add_argument("--start-chap", type=int, required=True, help="Chương bắt đầu")
     p_merge.add_argument("--end-chap", type=int, required=True, help="Chương kết thúc")
     p_merge.add_argument("--start-vol", type=int, required=True, help="Số tập bắt đầu (do người dùng chỉ định)")
     p_merge.add_argument("--per-vol", type=int, default=4, help="Số chương mỗi tập (mặc định: 4, chỉ dùng cho bước gộp tập)")
-    p_merge.add_argument("--out-dir", default="output_volumes", help="Thư mục xuất file")
+    p_merge.add_argument("--out-dir", default="", help="Thư mục xuất file")
     p_merge.add_argument("--overwrite", action="store_true", help="Ghi đè file nếu đã tồn tại")
     p_merge.add_argument("--allow-partial", action="store_true", help="Cho phép xuất nhóm cuối dưới 4 chương")
     p_merge.add_argument("--no-spellcheck", action="store_true", help="Tắt tính năng sửa chính tả")
@@ -249,16 +268,17 @@ def main():
 
     # Subcommand: process
     p_proc = subparsers.add_parser("process", help="Thực hiện trọn gói pipeline từ nạp/tải đến xuất tập")
+    p_proc.add_argument("--story", default="", help="Hồ sơ truyện: 'pham-nhan-tu-tien', 'tien-nghich'")
     p_proc.add_argument("--import-dir", help="Thư mục nạp tệp offline (nếu có)")
     p_proc.add_argument("--story-id", type=int, help="ID truyện trong CSDL")
     p_proc.add_argument("--story-url", help="URL truyện")
     p_proc.add_argument("--start-url", help="URL chương bắt đầu (nếu tải mạng)")
-    p_proc.add_argument("--title", default="Phàm Nhân Tu Tiên", help="Tên truyện")
+    p_proc.add_argument("--title", default="", help="Tên truyện")
     p_proc.add_argument("--start-chap", type=int, required=True, help="Khoảng tải: Chương bắt đầu")
     p_proc.add_argument("--end-chap", type=int, required=True, help="Khoảng tải: Chương kết thúc")
     p_proc.add_argument("--start-vol", type=int, required=True, help="Số tập bắt đầu")
     p_proc.add_argument("--per-vol", type=int, default=4, help="Số chương mỗi tập (chỉ phục vụ gộp tập, không giới hạn tải)")
-    p_proc.add_argument("--out-dir", default="output_volumes", help="Thư mục xuất file")
+    p_proc.add_argument("--out-dir", default="", help="Thư mục xuất file")
     p_proc.add_argument("--overwrite", action="store_true", help="Ghi đè file nếu đã tồn tại")
     p_proc.add_argument("--allow-partial", action="store_true", help="Cho phép xuất nhóm cuối dưới 4 chương")
     p_proc.add_argument("--no-spellcheck", action="store_true", help="Tắt tính năng sửa chính tả")

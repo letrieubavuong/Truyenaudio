@@ -30,27 +30,36 @@ Hệ thống desktop Python chạy trên Windows / đa nền tảng hỗ trợ t
 c:\Lap trinh Android\PNTT Truyen\
 ├── core\
 │   ├── models.py           # Dataclass: Chapter, Volume, SpellIssue, StoryInfo (băm, version)
-│   ├── parser.py           # Phân tích HTML vivutruyen và tệp văn bản TXT
+│   ├── profiles.py         # Hồ sơ truyện đa nguồn: Phàm Nhân Tu Tiên, Tiên Nghịch, template mở/kết
+│   ├── parser.py           # Phân tích HTML vivutruyen.com, webnovel.vn và tệp văn bản TXT
 │   ├── storage.py          # Quản lý CSDL SQLite, bản gốc bất biến, versioning, lưu quyết định duyệt
 │   ├── crawler.py          # Tải mạng tuần tự, rate limit, timeout, chống lặp URL
 │   ├── importer.py         # Nạp tệp offline HTML/TXT vào SQLite
 │   ├── spellchecker.py     # Chuẩn hóa NFC, dọn gạch dưới, khoảng trắng, bảo vệ từ che c*m v**
 │   ├── ai_checker.py       # Trợ lý AI đề xuất (mặc định pending, schema check, ẩn API key)
 │   ├── merger.py           # Bộ gộp 4 chương/tập audio, chuẩn hóa \s\n -> \n, xử lý DRAFT
-│   └── reporter.py         # Xuất bundle an toàn (file tạm .tmp): RAW, EDITED, REPORT, CHANGELOG
+│   ├── reporter.py         # Xuất bundle an toàn (file tạm .tmp): RAW, EDITED, REPORT, CHANGELOG
+│   ├── video_models.py     # Dataclass hàng đợi Audio/Video và cấu hình xuất video YouTube
+│   ├── video_renderer.py   # Bộ dựng khung hình QPainter dùng chung 100% giữa Preview và FFmpeg
+│   └── ffmpeg_utils.py     # Gọi FFmpeg/ffprobe qua subprocess, đọc tiến độ pipe:1, xuất an toàn .tmp
 ├── resources\
-│   ├── default_dictionary.json  # Từ điển lỗi gõ có thể mở rộng (đã lọc các cặp trùng nhau)
-│   ├── protected_terms.json     # Danh từ riêng, tên nhân vật, địa danh được bảo vệ
-│   └── styles.qss               # Giao diện nền sáng hiện đại PySide6
+│   ├── default_dictionary.json            # Từ điển lỗi gõ có thể mở rộng (đã lọc các cặp trùng nhau)
+│   ├── protected_terms.json               # Danh từ riêng, tên nhân vật, địa danh Phàm Nhân Tu Tiên
+│   ├── protected_terms_tien_nghich.json   # Thuật ngữ tu tiên, nhân vật, môn phái Tiên Nghịch
+│   └── styles.qss                         # Giao diện nền sáng hiện đại PySide6
 ├── gui\
 │   ├── widgets.py          # Bảng chương & Giao diện duyệt Side-by-Side (chuột + phím Space)
 │   ├── dialogs.py          # Hộp thoại cấu hình AI, từ điển, thuật ngữ bảo vệ
 │   ├── workers.py          # Luồng nền: CrawlWorker, SpellCheckWorker, ExportWorker riêng biệt
-│   └── main_window.py      # Cửa sổ chính với nút "Áp dụng và xuất tập..." sau khi duyệt
-├── cli.py                  # Giao diện dòng lệnh CLI đầy đủ chức năng
+│   ├── video_tab.py        # Tab "Sản Xuất Video": Quản lý danh sách, xem trước và xuất video
+│   ├── video_worker.py     # Luồng nền xuất video hàng loạt, báo cáo ETA/tiến độ, hỗ trợ hủy
+│   └── main_window.py      # Cửa sổ chính: Chọn truyện/nguồn, 4 tab nghiệp vụ hoàn chỉnh
+├── cli.py                  # Giao diện dòng lệnh CLI đầy đủ chức năng (--story)
 ├── app.py                  # Khởi chạy ứng dụng GUI PySide6
-├── data\sample_chapters\   # 4 chương mẫu thực tế phục vụ kiểm thử offline
-└── tests\                  # Bộ kiểm thử tự động toàn diện (33/33 PASS 100%)
+├── data\
+│   ├── sample_chapters\   # 4 chương mẫu thực tế phục vụ kiểm thử offline PNTT
+│   └── fixtures\          # Fixture HTML thực tế webnovel.vn (mục lục và chương Tiên Nghịch)
+└── tests\                  # Bộ kiểm thử tự động toàn diện (69/69 PASS 100%)
 ```
 
 ---
@@ -69,15 +78,27 @@ pip install -r requirements.txt
 python -m unittest discover -s tests -p "test_*.py"
 ```
 
+3. **Đóng gói tệp thực thi Windows (.EXE) độc lập:**
+- Cách 1: Chạy file kịch bản tự động `build_exe.bat` (nhấp đúp hoặc chạy trong cmd/powershell):
+  ```cmd
+  build_exe.bat
+  ```
+- Cách 2: Sử dụng PyInstaller trực tiếp từ môi trường ảo:
+  ```bash
+  .venv\Scripts\pyinstaller --clean -y TruyenAudio.spec
+  ```
+- Kết quả: File thực thi độc lập **`dist\TruyenAudio.exe`** (~56MB) đã đóng gói đầy đủ Python runtime, Qt PySide6 và tài nguyên từ điển/stylesheet, có thể chạy trực tiếp trên bất kỳ máy tính Windows nào mà không cần cài đặt Python.
+
 ---
 
 ## 4. HƯỚNG DẪN SỬ DỤNG
 
-### A. Quy trình trên Giao diện Desktop (PySide6)
-Chạy lệnh trong terminal:
-```bash
-python app.py
-```
+### A. Chạy ứng dụng
+- **Dùng file EXE độc lập:** Nhấp đúp vào `dist\TruyenAudio.exe`.
+- **Dùng mã nguồn Python:**
+  ```bash
+  python app.py
+  ```
 
 Quy trình xử lý chia thành các bước rõ ràng:
 1. **Bước 1: Nạp hoặc Tải dữ liệu:**
@@ -213,20 +234,107 @@ Hệ thống luôn phân định rõ và hiển thị 3 chỉ số số lượng
 
 ---
 
-## 7. KẾT QUẢ KIỂM THỬ TOÀN DIỆN
-Bộ kiểm thử tự động gồm **53 test case** bao phủ toàn diện:
-- Kiểm tra khởi động CLI (`cli.py --help`) và GUI (PySide6 offscreen).
-- Tải 12 chương giả lập và gộp thành 3 tập hoàn chỉnh.
-- Cache chương 1–4, chương 4 thiếu `next_url` -> tải lại trang lấy điều hướng và tiếp tục đến chương 12.
-- Kiểm tra phân loại lỗi: HTTP 403, HTTP 429, timeout, trang rỗng, URL lặp, chuyển hướng sai.
-- Đề xuất chồng lấn, sai lệch hash, sai lệch văn bản lát cắt.
-- Xử lý Unicode NFC và NFD tiếng Việt.
-- Cách ly quyết định duyệt giữa các truyện và phiên bản nội dung.
-- Migration CSDL SQLite phiên bản cũ bảo toàn dữ liệu.
-- Định dạng audio, loại bỏ tiêu đề chương và chuẩn hóa `\s\n` -> `\n`.
+## 8. HỖ TRỢ ĐA TRUYỆN: TIÊN NGHỊCH (WEBNOVEL.VN)
+
+Hệ thống hỗ trợ cơ chế hồ sơ truyện đa nguồn (`core/profiles.py`), cho phép chuyển đổi linh hoạt giữa:
+1. **Phàm Nhân Tu Tiên** – Nguồn `vivutruyen.com` (Tác giả: Vong Ngữ)
+2. **Tiên Nghịch** – Nguồn `webnovel.vn` (Tác giả: Nhĩ Căn, URL: `https://webnovel.vn/tien-nghich`)
+
+### A. Khảo sát & Phân tích Nguồn `webnovel.vn`:
+- **Mục lục:** Cấu trúc `<ol class="chapter-list" id="chapterList">` chứa trực tiếp các thẻ `<a class="chapter-item__link">` với chỉ số `<span class="chapter-item__index">` và tên chương `<span class="chapter-item__title">`.
+- **Nội dung chương:**
+  - Tiêu đề chương: `<p class="reader__chapter">`.
+  - Đoạn văn nội dung: Nằm trong `<div id="chapter-c">` thuộc `<article class="reader__content">`.
+  - **Làm sạch rác & quảng cáo:** Loại bỏ hoàn toàn khối `<div class="bastorypush">` (quảng cáo đề cử nội bộ), dọn sạch các thẻ nút chia sẻ và menu điều hướng.
+  - **Điều hướng chương:** Trích xuất liên kết "Chương sau" và "Chương trước" từ cụm `<div class="reader__actions">`.
+- **Bảo vệ và cách ly dữ liệu:**
+  - Dữ liệu chương lưu trong CSDL riêng biệt hoặc tách theo `story_id`.
+  - Thư mục xuất riêng: `output_volumes/tien_nghich/` (tránh xung đột số tập với Phàm Nhân Tu Tiên).
+  - Từ điển thuật ngữ bảo vệ riêng: `resources/protected_terms_tien_nghich.json` bảo vệ tên nhân vật (Vương Lâm, Lý Mộ Uyển, Tư Đồ Nam,...), môn phái (Hằng Nhạc Phái, Thi Ma Tông,...) và cảnh giới tu luyện.
+
+### B. Mẫu Mở Đầu & Kết Thúc Tập Tiên Nghịch:
+- **Đầu file:**
+  ```
+  TIÊN NGHỊCH - TẬP {tap}
+  Chào mừng các bạn đang theo dõi bộ truyện tiên hiệp Tiên Nghịch, tác giả Nhĩ Căn.
+  Đây là Tập {tap}, phát từ Chương {chuong_dau} đến Chương {chuong_cuoi}.
+  Chúc các bạn có những giây phút thư giãn và trải nghiệm tuyệt vời.
+  ```
+- **Cuối file:**
+  ```
+  Hết Tập {tap}: Cảm ơn quý thính giả đã chú ý lắng nghe. Hẹn gặp lại các bạn trong Tập {tap_tiep_theo} tiếp theo!
+  ```
+
+### C. Sử dụng qua CLI cho Tiên Nghịch:
+```bash
+# Nạp và xử lý truyện Tiên Nghịch từ thư mục offline:
+python cli.py process --story tien-nghich --import-dir data/sample_tien_nghich --start-chap 1 --end-chap 12 --start-vol 1 --overwrite
+
+# Tải từ webnovel.vn (hoặc kiểm tra fixture offline):
+python cli.py crawl --story tien-nghich --url https://webnovel.vn/tien-nghich/chuong-1 --start-chap 1 --end-chap 4
+```
+
+---
+
+## 9. TAB "SẢN XUẤT VIDEO" (YOUTUBE READY MP4)
+
+Tab **"🎬 Sản Xuất Video"** tích hợp trực tiếp trên giao diện PySide6, cho phép ghép các file âm thanh MP3 thành video MP4 chất lượng cao 1080p hoặc 720p để đăng tải YouTube.
+
+### A. Tính Năng Nổi Bật:
+1. **Danh sách hàng đợi Audio:**
+   - Hỗ trợ thêm từng file MP3 hoặc quét toàn bộ file MP3 trong thư mục.
+   - Hỗ trợ đầy đủ đường dẫn tiếng Việt có dấu và dấu cách trên Windows.
+   - Tự động nhận diện thông minh metadata từ tên tệp (Tên truyện, Tác giả, Số tập, Khoảng chương) hoặc liên kết dữ liệu từ các tập truyện đã có trong ứng dụng.
+   - Sắp xếp tự nhiên theo số tập (Tập 2 luôn đứng trước Tập 10).
+   - Chặn thêm trùng file; cho phép chỉnh sửa metadata từng mục trực quan.
+2. **Ảnh nền & Hiển thị thông minh:**
+   - Hỗ trợ ảnh JPG, JPEG, PNG với cơ chế chọn ảnh chung cho cả dự án hoặc ảnh riêng cho từng tập.
+   - **2 chế độ hiển thị:**
+     + *Cắt đầy khung (Crop & Fill):* Giữ nguyên tỉ lệ, phóng to phủ kín khung hình 16:9, không biến dạng méo hình.
+     + *Hiển thị toàn ảnh (Fit & Letterbox):* Giữ nguyên tỉ lệ ảnh gốc, tự động chèn viền nền tối hai bên hoặc trên dưới.
+3. **Typography & Thiết lập Chữ Tiếng Việt:**
+   - Tùy biến bật/tắt từng thành phần: Tên truyện, Tác giả, Số tập, Khoảng chương.
+   - Hỗ trợ chọn Font hệ thống tiếng Việt (Segoe UI, Arial, Calibri, Tahoma,...), kích thước, màu chữ, viền chữ (stroke outline), và bóng đổ (drop shadow).
+   - Tự động xuống dòng khi tiêu đề dài, giữ khoảng cách an toàn với mép khung hình (Safe margin padding).
+4. **Bộ dựng chung (Shared Renderer) & Xem trước chính xác 100%:**
+   - Dùng chung bộ kết xuất `render_frame()` bằng PySide6 QPainter cho cả khung hình xem trước (Live Preview / Phóng to) và khung hình đưa vào FFmpeg mã hóa video. Đảm bảo chữ tiếng Việt sắc nét và hình ảnh xem trước hoàn toàn khớp với video thành phẩm.
+5. **Mã hóa FFmpeg & An toàn tệp tin:**
+   - Thiết lập chuẩn YouTube: Container MP4, Video H.264 (yuv420p), Audio AAC 192kbps, cờ `+faststart`.
+   - Xuất qua tệp tạm `.tmp.mp4`, chỉ đổi tên chính thức sau khi `ffprobe` kiểm tra có đầy đủ luồng video, luồng audio và thời lượng trùng khớp với file MP3.
+   - Không lo deadlock: Đọc tiến độ bằng cờ machine-readable `-progress pipe:1` và luồng nền hút sạch `stderr`.
+   - Hỗ trợ hủy tác vụ an toàn (dừng tiến trình FFmpeg và dọn dẹp file tạm).
+   - Chính sách ghi đè rõ ràng: *Ghi đè (Overwrite)*, *Bỏ qua (Skip)*, hoặc *Tự đổi tên thêm hậu tố (Rename)*.
+
+### B. Cấu hình FFmpeg trên Windows:
+- Công cụ tự động quét FFmpeg và ffprobe trong `PATH` hệ thống hoặc thư mục mặc định `C:\ffmpeg\bin\`.
+- Cho phép người dùng duyệt chọn file thực thi thủ công trên giao diện.
+- Nút **"Kiểm tra FFmpeg"** xác minh phiên bản và khả năng hoạt động ngay trên màn hình.
+- **Hướng dẫn cài đặt nhanh FFmpeg trên Windows:**
+  1. Tải bản build đầy đủ từ [gyan.dev/ffmpeg/builds](https://www.gyan.dev/ffmpeg/builds/) (tệp `ffmpeg-release-essentials.zip`).
+  2. Giải nén vào `C:\ffmpeg` sao cho có đường dẫn `C:\ffmpeg\bin\ffmpeg.exe`.
+  3. Thêm `C:\ffmpeg\bin` vào biến môi trường `PATH` của Windows (hoặc duyệt chọn file trực tiếp trên giao diện ứng dụng).
+
+---
+
+## 10. KẾT QUẢ KIỂM THỬ TOÀN DIỆN
+
+Bộ kiểm thử tự động gồm **69 test case** bao phủ 100% các chức năng cốt lõi:
+- Khởi động CLI (`cli.py --help`) và GUI (PySide6 offscreen).
+- Tải giả lập 12 chương và xuất 3 tập hoàn chỉnh.
+- Cache chương 1–4, phục hồi liên kết điều hướng và tiếp tục thu thập.
+- Phát hiện và phân loại lỗi HTTP 403, 429, timeout, trang rỗng, URL lặp.
+- Cách ly hoàn toàn CSDL, hồ sơ và quyết định duyệt giữa Phàm Nhân Tu Tiên và Tiên Nghịch.
+- Phân tích mục lục, trích xuất nội dung và làm sạch quảng cáo `bastorypush` nguồn `webnovel.vn`.
+- Đọc metadata audio bằng ffprobe, sắp xếp tập tự nhiên theo số.
+- Xử lý đường dẫn tiếng Việt có dấu, khoảng trắng và ký tự đặc biệt.
+- Dựng ảnh khung hình đúng kích thước, giữ đúng tỉ lệ ở cả 2 chế độ (`crop_fill` và `fit_letterbox`).
+- Chống tràn khung chữ dài, xử lý font tiếng Việt, đổ bóng viền chữ.
+- Mã hóa video MP4 thật bằng FFmpeg, kiểm tra stream video/audio và thời lượng chuẩn xác.
+- Hủy tác vụ xuất video an toàn, dọn tệp tạm, chịu lỗi từng mục trong hàng đợi và bảo vệ chống ghi đè mất tệp.
 
 Chạy toàn bộ kiểm thử:
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
 ```
-*Kết quả:* **53/53 test đạt (OK) 100%.**
+*Kết quả:* **69/69 test đạt (OK) 100%.**
+

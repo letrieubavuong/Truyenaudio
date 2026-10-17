@@ -33,6 +33,7 @@ class CrawlWorker(QThread):
         end_chap: int,
         import_dir: str = "",
         delay: float = 1.5,
+        story_title: str = "",
     ):
         super().__init__()
         self.storage = storage
@@ -42,6 +43,7 @@ class CrawlWorker(QThread):
         self.end_chap = end_chap
         self.import_dir = import_dir
         self.delay = delay
+        self.story_title = story_title
         self.crawler = NetworkCrawler(storage=self.storage, delay_seconds=self.delay)
         self.importer = OfflineImporter(storage=self.storage)
 
@@ -61,7 +63,7 @@ class CrawlWorker(QThread):
                 chapters = self.importer.import_directory(
                     directory_path=self.import_dir,
                     story_url=self.story_url or "offline://local-story",
-                    story_title="Phàm Nhân Tu Tiên",
+                    story_title=self.story_title,
                     on_progress=lambda c, t, m: self.progress_changed.emit(c, t, m),
                     on_log=lambda l, m: self.log_message.emit(l, m),
                 )
@@ -103,6 +105,7 @@ class SpellCheckWorker(QThread):
         do_spellcheck: bool = True,
         use_ai: bool = False,
         ai_checker: Optional[AIChecker] = None,
+        story_title: str = "",
     ):
         super().__init__()
         self.storage = storage
@@ -115,6 +118,7 @@ class SpellCheckWorker(QThread):
         self.do_spellcheck = do_spellcheck
         self.use_ai = use_ai
         self.ai_checker = ai_checker
+        self.story_title = story_title
         self._is_stopped = False
 
     def stop(self):
@@ -195,7 +199,7 @@ class SpellCheckWorker(QThread):
                 start_volume_num=self.start_vol,
                 expected_start_chap=self.start_chap,
                 expected_end_chap=self.end_chap,
-                story_title="Phàm Nhân Tu Tiên",
+                story_title=self.story_title or "Phàm Nhân Tu Tiên",
             )
 
             # Phát tín hiệu sẵn sàng để người dùng xem trước và duyệt trên giao diện

@@ -32,8 +32,10 @@ class VietnameseSpellChecker:
 
     def load_resources(self):
         """Tải từ điển và danh sách từ ngữ được bảo vệ từ các tệp JSON."""
+        from core.utils import get_resource_path
+        dict_real_path = get_resource_path(self.dictionary_path)
         try:
-            with open(self.dictionary_path, "r", encoding="utf-8") as f:
+            with open(dict_real_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 raw_map = data.get("replacements", {})
                 # Lọc bỏ các cặp từ không thay đổi nội dung (original == replacement)
@@ -47,12 +49,18 @@ class VietnameseSpellChecker:
             self.dictionary_map = {}
             self.context_rules = []
 
+        terms_real_path = get_resource_path(self.protected_terms_path)
         try:
-            with open(self.protected_terms_path, "r", encoding="utf-8") as f:
+            with open(terms_real_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 self.protected_terms = data.get("terms", [])
         except Exception:
             self.protected_terms = []
+
+    def set_protected_terms_path(self, protected_terms_path: str):
+        """Cập nhật đường dẫn tệp thuật ngữ bảo vệ theo từng truyện và nạp lại."""
+        self.protected_terms_path = protected_terms_path
+        self.load_resources()
 
     def check_paragraph(
         self,

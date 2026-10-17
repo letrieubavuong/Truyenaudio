@@ -84,12 +84,21 @@ class VolumeMerger:
         prologue_template: str = "",
         epilogue_template: str = "",
         allow_partial_last_volume: bool = False,
+        story_profile: Optional[Any] = None,
     ):
         self.chapters_per_volume = chapters_per_volume
         self.include_prologue = include_prologue
         self.include_epilogue = include_epilogue
-        self.prologue_template = prologue_template or self.DEFAULT_PROLOGUE
-        self.epilogue_template = epilogue_template or self.DEFAULT_EPILOGUE
+        self.story_profile = story_profile
+        if story_profile and not prologue_template:
+            self.prologue_template = story_profile.prologue_template
+        else:
+            self.prologue_template = prologue_template or self.DEFAULT_PROLOGUE
+
+        if story_profile and not epilogue_template:
+            self.epilogue_template = story_profile.epilogue_template
+        else:
+            self.epilogue_template = epilogue_template or self.DEFAULT_EPILOGUE
         self.allow_partial_last_volume = allow_partial_last_volume
 
     def build_volumes(
@@ -152,6 +161,10 @@ class VolumeMerger:
             so_tap = current_vol_num
             so_tap_tiep_theo = current_vol_num + 1
 
+            ten_truyen = self.story_profile.title if self.story_profile else (story_title or "Phàm Nhân Tu Tiên")
+            tac_gia = self.story_profile.author if self.story_profile else ("Nhĩ Căn" if "Tiên Nghịch" in ten_truyen else "Vong Ngữ")
+            the_loai = self.story_profile.genre if self.story_profile else "tiên hiệp"
+
             format_kwargs = {
                 "tap": so_tap,
                 "so_tap": so_tap,
@@ -159,7 +172,11 @@ class VolumeMerger:
                 "chuong_cuoi": chuong_cuoi,
                 "tap_tiep_theo": so_tap_tiep_theo,
                 "so_tap_tiep_theo": so_tap_tiep_theo,
-                "story_title": story_title or "Phàm Nhân Tu Tiên",
+                "story_title": ten_truyen,
+                "ten_truyen": ten_truyen,
+                "ten_truyen_upper": ten_truyen.upper(),
+                "tac_gia": tac_gia,
+                "the_loai": the_loai,
                 "volume_num": so_tap,
                 "start_chapter": chuong_dau,
                 "end_chapter": chuong_cuoi,

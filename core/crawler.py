@@ -266,6 +266,18 @@ class NetworkCrawler:
                             existing_chap = cand_chap
 
             if existing_chap and existing_chap.status in ("verified", "downloaded") and existing_chap.raw_content:
+                # Kiểm tra xem nội dung lưu trước đó có phải trang chặn / đăng nhập rác hay không
+                clean_raw = existing_chap.raw_content.strip().lower()
+                is_bogus = (
+                    "đăng nhập để đọc" in clean_raw
+                    or "mở chương\n\nđăng nhập" in clean_raw
+                    or (len(clean_raw) < 100 and "đăng nhập" in clean_raw)
+                )
+                if is_bogus:
+                    log("WARNING", f"Chương {existing_chap.chapter_num} trong CSDL là trang chặn đăng nhập rác. Đang bỏ qua...")
+                    existing_chap = None
+
+            if existing_chap and existing_chap.status in ("verified", "downloaded") and existing_chap.raw_content:
                 chap_display_num = existing_chap.chapter_num or current_num
                 last_processed_chap_num = chap_display_num
                 if existing_chap.content_hash:
@@ -380,8 +392,8 @@ class NetworkCrawler:
                 base_url=story_url,
             )
             if "error" in parsed:
-                stop_reason = f"Phân tích thất bại tại Chương {current_num}: {parsed['error']}"
-                status_category = "parse_error"
+                stop_reason = f"Tại Chương {current_num}: {parsed['error']}"
+                status_category = parsed.get("status_category", "parse_error")
                 log("ERROR", f"[DỪNG] {stop_reason}")
                 break
 

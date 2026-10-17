@@ -182,7 +182,7 @@ class ReportGenerator:
         output_dir: str,
         merger: VolumeMerger,
         issues: List[SpellIssue],
-        edited_paragraphs_map: Dict[int, List[str]],
+        edited_paragraphs_map: Optional[Dict[int, List[str]]] = None,
         overwrite: bool = False,
         export_reports: bool = False,
     ) -> Dict[str, str]:
