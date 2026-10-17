@@ -15,7 +15,9 @@ import json
 import re
 import time
 from typing import Dict, Any, Tuple, Optional, Callable, List
-from core.video_models import AudioVideoItem, VideoConfig
+import queue
+import threading
+from core.video_models import AudioVideoItem, VideoConfig, EncodeResult
 
 
 def find_ffmpeg(custom_ffmpeg: str = "", custom_ffprobe: str = "") -> Tuple[str, str]:
@@ -64,6 +66,18 @@ def find_ffmpeg(custom_ffmpeg: str = "", custom_ffprobe: str = "") -> Tuple[str,
     return ffmpeg_bin, ffprobe_bin
 
 
+def get_subprocess_hidden_kwargs() -> Dict[str, Any]:
+    """Tạo tham số ẩn hoàn toàn cửa sổ console/CMD khi chạy subprocess trên Windows."""
+    kwargs: Dict[str, Any] = {}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 1)
+        si.wShowWindow = 0  # SW_HIDE
+        kwargs["startupinfo"] = si
+    return kwargs
+
+
 def check_ffmpeg_installed(custom_ffmpeg: str = "", custom_ffprobe: str = "") -> Tuple[bool, str, str]:
     """
     Kiểm tra ffmpeg và ffprobe có hoạt động không.
@@ -77,13 +91,13 @@ def check_ffmpeg_installed(custom_ffmpeg: str = "", custom_ffprobe: str = "") ->
         return False, f"Tìm thấy ffmpeg ({ff_path}) nhưng thiếu ffprobe.", ""
 
     try:
-        p1 = subprocess.run([ff_path, "-version"], capture_output=True, text=True, check=True, timeout=5)
+        p1 = subprocess.run([ff_path, "-version"], capture_output=True, text=True, check=True, timeout=5, **get_subprocess_hidden_kwargs())
         ff_ver = p1.stdout.splitlines()[0] if p1.stdout else "FFmpeg OK"
     except Exception as e:
         return False, f"Không thể khởi chạy ffmpeg: {e}", ""
 
     try:
-        p2 = subprocess.run([fp_path, "-version"], capture_output=True, text=True, check=True, timeout=5)
+        p2 = subprocess.run([fp_path, "-version"], capture_output=True, text=True, check=True, timeout=5, **get_subprocess_hidden_kwargs())
         fp_ver = p2.stdout.splitlines()[0] if p2.stdout else "ffprobe OK"
     except Exception as e:
         return False, ff_ver, f"Không thể khởi chạy ffprobe: {e}"
@@ -123,7 +137,7 @@ def probe_media(filepath: str, ffprobe_path: str = "") -> Dict[str, Any]:
     ]
 
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=15)
+        proc = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=15, **get_subprocess_hidden_kwargs())
         data = json.loads(proc.stdout)
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"ffprobe quá thời gian chờ khi đọc tệp: {filepath}")
@@ -201,18 +215,50 @@ def resolve_output_filename(dest_dir: str, base_filename: str, overwrite_mode: s
         idx += 1
 
 
+def _stop_process(p: Optional[subprocess.Popen], timeout: float = 2.5):
+    """Dừng tiến trình có bảo đảm: terminate -> wait -> kill -> wait."""
+    if p is None or p.poll() is not None:
+        return
+    try:
+        p.terminate()
+        try:
+            p.wait(timeout=timeout)
+        except (subprocess.TimeoutExpired, Exception):
+            p.kill()
+            p.wait(timeout=timeout)
+    except Exception:
+        try:
+            p.kill()
+            p.wait(timeout=timeout)
+        except Exception:
+            pass
+
+
+def _clean_temp_file(path: str):
+    """Xóa file tạm an toàn sau khi tiến trình đã giải phóng handle."""
+    if path and os.path.exists(path):
+        for _ in range(5):
+            try:
+                os.remove(path)
+                break
+            except Exception:
+                time.sleep(0.05)
+
+
 def encode_video_from_frame(
     item: AudioVideoItem,
     frame_image_path: str,
     config: VideoConfig,
     on_progress: Optional[Callable[[float], None]] = None,
     check_cancel: Optional[Callable[[], bool]] = None,
-) -> str:
+) -> EncodeResult:
     """
     Mã hóa video MP4 từ ảnh khung hình tĩnh và file MP3 bằng FFmpeg.
-    - Đảm bảo an toàn qua file tạm .tmp.mp4.
-    - Kiểm tra tiến độ machine-readable (-progress pipe:1).
-    - Hỗ trợ dừng / hủy tác vụ và dọn file tạm.
+    - Đảm bảo an toàn qua file tạm riêng .tmp.mp4 cùng thư mục đích.
+    - Không xóa file cũ trước khi thay thế; bảo toàn file cũ khi thay thế thất bại.
+    - Thu nhận stdout qua hàng đợi nền (non-blocking) và stderr tránh deadlock.
+    - Phản ứng hủy tác vụ tức thì (trong vòng 100ms), terminate -> kill -> wait triệt để.
+    - Dọn dẹp file tạm chỉ sau khi tiến trình đã hoàn toàn kết thúc.
     - Xác minh video/audio stream và thời lượng bằng ffprobe trước khi hoàn tất.
     """
     ff_bin, fp_bin = find_ffmpeg(config.ffmpeg_path, config.ffprobe_path)
@@ -231,19 +277,17 @@ def encode_video_from_frame(
     base_name = item.suggested_output_filename()
     final_output = resolve_output_filename(out_dir, base_name, config.overwrite_mode)
 
+    # Chế độ skip: nếu file đích đã tồn tại thì không mã hóa, trả về kết quả skipped
     if os.path.exists(final_output) and config.overwrite_mode == "skip":
-        if on_progress:
-            on_progress(100.0)
-        return final_output
+        return EncodeResult(
+            output_path=final_output,
+            status="skipped",
+            message=f"Tệp '{os.path.basename(final_output)}' đã tồn tại, bỏ qua theo cấu hình."
+        )
 
-    temp_output = final_output + ".tmp.mp4"
-
-    # Xóa file tạm cũ nếu còn sót lại từ lần chạy trước
-    if os.path.exists(temp_output):
-        try:
-            os.remove(temp_output)
-        except Exception:
-            pass
+    # Đặt file tạm độc nhất trong cùng thư mục đích để đảm bảo os.replace là atomic trên cùng volume
+    temp_filename = f".tmp_{os.path.splitext(os.path.basename(final_output))[0]}_{os.getpid()}_{int(time.time()*1000)}.mp4"
+    temp_output = os.path.join(out_dir, temp_filename)
 
     # Lấy thời lượng audio chuẩn xác
     audio_dur = item.duration
@@ -273,53 +317,64 @@ def encode_video_from_frame(
         temp_output,
     ]
 
-    import threading
-
+    stdout_queue: queue.Queue = queue.Queue()
     stderr_lines: List[str] = []
-
-    def _drain_stderr():
-        try:
-            for s_line in proc.stderr:
-                stderr_lines.append(s_line)
-                if len(stderr_lines) > 200:
-                    stderr_lines.pop(0)
-        except Exception:
-            pass
-
-    proc = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        bufsize=1,
-        encoding="utf-8",
-        errors="replace",
-    )
-
-    t_err = threading.Thread(target=_drain_stderr, daemon=True)
-    t_err.start()
+    proc: Optional[subprocess.Popen] = None
 
     try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            encoding="utf-8",
+            errors="replace",
+            **get_subprocess_hidden_kwargs(),
+        )
+
+        def _drain_stdout():
+            try:
+                if proc and proc.stdout:
+                    for s_line in iter(proc.stdout.readline, ""):
+                        stdout_queue.put(s_line)
+            except Exception:
+                pass
+            finally:
+                stdout_queue.put(None)
+
+        def _drain_stderr():
+            try:
+                if proc and proc.stderr:
+                    for s_line in iter(proc.stderr.readline, ""):
+                        stderr_lines.append(s_line)
+                        if len(stderr_lines) > 200:
+                            stderr_lines.pop(0)
+            except Exception:
+                pass
+
+        t_stdout = threading.Thread(target=_drain_stdout, daemon=True)
+        t_stderr = threading.Thread(target=_drain_stderr, daemon=True)
+        t_stdout.start()
+        t_stderr.start()
+
+        # Vòng lặp nhận dữ liệu không bị chặn vô hạn khi kiểm tra hủy
         while True:
             if check_cancel and check_cancel():
-                proc.terminate()
-                try:
-                    proc.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                if os.path.exists(temp_output):
-                    try:
-                        os.remove(temp_output)
-                    except Exception:
-                        pass
+                _stop_process(proc)
+                _clean_temp_file(temp_output)
                 raise RuntimeError("Tác vụ xuất video đã bị người dùng hủy.")
 
-            line = proc.stdout.readline()
-            if not line:
+            try:
+                line = stdout_queue.get(timeout=0.1)
+            except queue.Empty:
                 if proc.poll() is not None:
                     break
-                time.sleep(0.02)
                 continue
+
+            if line is None:
+                # Kênh stdout đã kết thúc
+                break
 
             line = line.strip()
             # Bắt tiến độ máy đọc: out_time_us=... hoặc out_time_ms=... hoặc out_time=00:01:23.456
@@ -346,71 +401,72 @@ def encode_video_from_frame(
                     on_progress(99.0)
 
         ret = proc.wait()
-        t_err.join(timeout=1.0)
+        t_stdout.join(timeout=1.0)
+        t_stderr.join(timeout=1.0)
+
+        if check_cancel and check_cancel():
+            _clean_temp_file(temp_output)
+            raise RuntimeError("Tác vụ xuất video đã bị người dùng hủy.")
+
         if ret != 0:
             err_details = "".join(stderr_lines)[-500:]
-            if os.path.exists(temp_output):
-                try:
-                    os.remove(temp_output)
-                except Exception:
-                    pass
+            _clean_temp_file(temp_output)
             raise RuntimeError(f"FFmpeg kết thúc với mã lỗi {ret}: {err_details}")
 
+        # Xác minh chất lượng tệp MP4 qua ffprobe
+        if not os.path.isfile(temp_output) or os.path.getsize(temp_output) == 0:
+            _clean_temp_file(temp_output)
+            raise RuntimeError("Tệp video xuất ra bị rỗng hoặc không tồn tại.")
+
+        probe_res = probe_media(temp_output, fp_bin)
+        if not probe_res.get("has_video"):
+            _clean_temp_file(temp_output)
+            raise RuntimeError("Tệp xuất ra không chứa luồng Video hợp lệ.")
+        if not probe_res.get("has_audio"):
+            _clean_temp_file(temp_output)
+            raise RuntimeError("Tệp xuất ra không chứa luồng Audio hợp lệ.")
+
+        # Cho phép sai số thời lượng nhỏ (< 2 giây do căn chỉnh khung hình)
+        diff = abs(probe_res["duration"] - audio_dur)
+        if diff > 2.0 and audio_dur > 5.0:
+            _clean_temp_file(temp_output)
+            raise RuntimeError(
+                f"Thời lượng video ({probe_res['duration']:.2f}s) lệch quá nhiều so với audio ({audio_dur:.2f}s)."
+            )
+
+        # Thay thế nguyên tử: KHÔNG xóa file hoàn chỉnh cũ trước.
+        # os.replace sẽ thay thế đích atomically. Nếu thất bại, file cũ vẫn còn nguyên.
+        try:
+            os.replace(temp_output, final_output)
+        except PermissionError as e:
+            _clean_temp_file(temp_output)
+            raise PermissionError(
+                f"Không thể ghi đè file đích '{final_output}'. File có thể đang được mở bởi ứng dụng khác hoặc thiếu quyền ghi: {e}"
+            )
+        except Exception as e:
+            _clean_temp_file(temp_output)
+            raise OSError(f"Lỗi khi thay thế file kết quả sang '{final_output}': {e}")
+
+        if on_progress:
+            on_progress(100.0)
+
+        return EncodeResult(output_path=final_output, status="completed", message="Xuất thành công")
+
     except Exception:
-        if proc.poll() is None:
-            proc.terminate()
-            try:
-                proc.wait(timeout=2)
-            except Exception:
-                proc.kill()
-        if os.path.exists(temp_output):
-            try:
-                os.remove(temp_output)
-            except Exception:
-                pass
+        if proc and proc.poll() is None:
+            _stop_process(proc)
+        _clean_temp_file(temp_output)
         raise
     finally:
-        try:
-            if proc.stdout:
-                proc.stdout.close()
-        except Exception:
-            pass
-        try:
-            if proc.stderr:
-                proc.stderr.close()
-        except Exception:
-            pass
-
-    # 4. Xác minh chất lượng tệp MP4 qua ffprobe
-    if not os.path.isfile(temp_output) or os.path.getsize(temp_output) == 0:
-        raise RuntimeError("Tệp video xuất ra bị rỗng hoặc không tồn tại.")
-
-    probe_res = probe_media(temp_output, fp_bin)
-    if not probe_res["has_video"]:
-        os.remove(temp_output)
-        raise RuntimeError("Tệp xuất ra không chứa luồng Video hợp lệ.")
-    if not probe_res["has_audio"]:
-        os.remove(temp_output)
-        raise RuntimeError("Tệp xuất ra không chứa luồng Audio hợp lệ.")
-
-    # Cho phép sai số thời lượng nhỏ (< 1.5 giây do căn chỉnh khung hình)
-    diff = abs(probe_res["duration"] - audio_dur)
-    if diff > 2.0 and audio_dur > 5.0:
-        os.remove(temp_output)
-        raise RuntimeError(
-            f"Thời lượng video ({probe_res['duration']:.2f}s) lệch quá nhiều so với audio ({audio_dur:.2f}s)."
-        )
-
-    # 5. Đổi tên nguyên tử sang tệp chính thức
-    if os.path.exists(final_output):
-        try:
-            os.remove(final_output)
-        except Exception as e:
-            pass
-
-    os.replace(temp_output, final_output)
-
-    if on_progress:
-        on_progress(100.0)
-
-    return final_output
+        if proc:
+            try:
+                if proc.stdout:
+                    proc.stdout.close()
+            except Exception:
+                pass
+            try:
+                if proc.stderr:
+                    proc.stderr.close()
+            except Exception:
+                pass
+        _clean_temp_file(temp_output)

@@ -4,7 +4,7 @@ Built with PySide6, clean light aesthetic, robust background threading,
 intuitive side-by-side diff review, and separate review/export phases.
 """
 import os
-import sys
+import time
 from typing import List, Dict, Any, Optional
 
 from PySide6.QtWidgets import (
@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QPushButton, QSpinBox, QCheckBox, QTabWidget, QProgressBar, QTextEdit,
     QFileDialog, QMessageBox, QGroupBox, QGridLayout, QStatusBar, QComboBox
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QCoreApplication
 from PySide6.QtGui import QIcon, QFont
 
 from core.storage import StorageManager
@@ -25,6 +25,7 @@ from gui.widgets import ChapterTableWidget, DiffReviewWidget
 from gui.dialogs import SettingsDialog
 from gui.workers import CrawlWorker, SpellCheckWorker, ExportWorker
 from gui.video_tab import VideoProductionTab
+from gui.tts_tab import AudioProductionTab
 
 
 class MainWindow(QMainWindow):
@@ -64,12 +65,17 @@ class MainWindow(QMainWindow):
         top_group = QGroupBox("1. Nguồn Dữ Liệu & Phương Thức Thu Thập")
         top_layout = QGridLayout(top_group)
 
-        top_layout.addWidget(QLabel("<b>Bộ truyện & Nguồn:</b>"), 0, 0)
+        top_layout.addWidget(QLabel("<b>Bộ truyện:</b>"), 0, 0)
         self.combo_story = QComboBox()
-        self.combo_story.addItem("Phàm Nhân Tu Tiên – vivutruyen.com", "pham-nhan-tu-tien")
-        self.combo_story.addItem("Tiên Nghịch – webnovel.vn", "tien-nghich")
+        self.combo_story.addItem("Phàm Nhân Tu Tiên", "pham-nhan-tu-tien")
+        self.combo_story.addItem("Tiên Nghịch", "tien-nghich")
         self.combo_story.currentIndexChanged.connect(self.on_story_changed)
-        top_layout.addWidget(self.combo_story, 0, 1, 1, 3)
+        top_layout.addWidget(self.combo_story, 0, 1)
+
+        top_layout.addWidget(QLabel("<b>Nguồn cung cấp:</b>"), 0, 2)
+        self.combo_source = QComboBox()
+        self.combo_source.currentIndexChanged.connect(self.on_source_changed)
+        top_layout.addWidget(self.combo_source, 0, 3)
 
         top_layout.addWidget(QLabel("URL Truyện:"), 1, 0)
         self.txt_story_url = QLineEdit(self.current_profile.story_url)
@@ -250,7 +256,13 @@ class MainWindow(QMainWindow):
 
         self.tabs_main.addTab(tab3_widget, "📊 Báo Cáo Markdown")
 
-        # Tab 4: Sản Xuất Video
+        # Tab 4: Sản Xuất Audio (VieNeu-TTS)
+        self.tts_tab = AudioProductionTab()
+        self.tts_tab.log_requested.connect(self.log)
+        self.tts_tab.transfer_to_video_requested.connect(self.on_transfer_tts_to_video)
+        self.tabs_main.addTab(self.tts_tab, "🎙️ Sản Xuất Audio")
+
+        # Tab 5: Sản Xuất Video
         self.video_tab = VideoProductionTab()
         self.video_tab.log_requested.connect(self.log)
         self.tabs_main.addTab(self.video_tab, "🎬 Sản Xuất Video")
@@ -262,24 +274,43 @@ class MainWindow(QMainWindow):
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("Sẵn sàng hoạt động.")
 
+    def on_transfer_tts_to_video(self, items_data: list):
+        """Tiếp nhận các tập MP3 từ thẻ Sản Xuất Audio chuyển sang Sản Xuất Video."""
+        added = self.video_tab.add_direct_items(items_data)
+        self.tabs_main.setCurrentWidget(self.video_tab)
+        self.log("INFO", f"Đã chuyển thành công {added} tập MP3 sang Tab Sản Xuất Video.")
+        self.status_bar.showMessage(f"Đã chuyển {added} tập MP3 sang Tab Sản Xuất Video.", 5000)
+
+    def update_source_combo(self):
+        """Cập nhật danh sách nguồn theo bộ truyện đang chọn."""
+        self.combo_source.blockSignals(True)
+        self.combo_source.clear()
+        story_key = self.combo_story.currentData() or "tien-nghich"
+        base_prof = get_profile(story_key)
+        for s_id, s_prof in base_prof.sources.items():
+            self.combo_source.addItem(s_prof.display_name, s_id)
+        if base_prof.active_source_id:
+            idx = self.combo_source.findData(base_prof.active_source_id)
+            if idx >= 0:
+                self.combo_source.setCurrentIndex(idx)
+        self.combo_source.blockSignals(False)
+
     def load_initial_data(self):
-        """Nạp danh sách chương hiện có trong SQLite lên bảng hiển thị theo hồ sơ truyện đang chọn."""
-        story_info = self.storage.get_or_create_story(
-            url=self.current_profile.story_url,
-            title=self.current_profile.title,
-            author=self.current_profile.author,
-        )
-        self.current_story_id = story_info.id or 1
-        chapters = self.storage.get_all_chapters(story_id=self.current_story_id)
-        self.table_chapters.update_chapters(chapters)
-        if chapters:
-            self.log("INFO", f"Đã nạp {len(chapters)} chương từ CSDL lưu trữ SQLite ({self.current_profile.title}, Story ID: {self.current_story_id}).")
+        """Nạp danh sách chương hiện có trong SQLite lên bảng hiển thị theo hồ sơ truyện & nguồn đang chọn."""
+        self.update_source_combo()
+        self.on_source_changed(self.combo_source.currentIndex())
 
     def on_story_changed(self, idx: int):
-        """Xử lý khi người dùng đổi truyện / nguồn giữa Phàm Nhân Tu Tiên và Tiên Nghịch."""
-        key = self.combo_story.currentData()
-        self.current_profile = get_profile(key)
-        self.setWindowTitle(f"Bộ Thu Thập, Hiệu Đính & Gộp Tập Truyện - {self.current_profile.title}")
+        """Xử lý khi người dùng đổi bộ truyện: cập nhật danh sách nguồn và giao diện."""
+        self.update_source_combo()
+        self.on_source_changed(self.combo_source.currentIndex())
+
+    def on_source_changed(self, idx: int):
+        """Xử lý khi người dùng đổi nguồn cung cấp của bộ truyện."""
+        story_key = self.combo_story.currentData() or "tien-nghich"
+        source_key = self.combo_source.currentData() or ""
+        self.current_profile = get_profile(story_key, source_id=source_key)
+        self.setWindowTitle(f"Bộ Thu Thập, Hiệu Đính & Gộp Tập Truyện - {self.current_profile.title} ({self.current_profile.source_domain})")
         self.txt_story_url.setText(self.current_profile.story_url)
         self.txt_start_url.setText(self.current_profile.start_chapter_url)
         self.txt_output_dir.setText(os.path.abspath(self.current_profile.default_output_dir))
@@ -297,7 +328,7 @@ class MainWindow(QMainWindow):
         self.current_volumes = []
         self.btn_export.setEnabled(False)
 
-        chapters = self.storage.get_all_chapters(story_id=self.current_story_id)
+        chapters = self.storage.get_all_chapters(story_id=self.current_story_id, source=source_key)
         self.table_chapters.update_chapters(chapters)
         self.log(
             "INFO",
@@ -349,7 +380,8 @@ class MainWindow(QMainWindow):
 
     def on_start_chap_changed(self, val: int):
         if hasattr(self, "storage") and self.storage:
-            ch = self.storage.get_chapter_by_num(self.current_story_id, val)
+            source_key = self.combo_source.currentData() if hasattr(self, "combo_source") else ""
+            ch = self.storage.get_chapter_by_num(self.current_story_id, val, source=source_key)
             if ch and ch.source_url and ch.source_url.startswith("http"):
                 self.txt_start_url.setText(ch.source_url)
 
@@ -407,11 +439,13 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage(msg)
 
     def on_chapter_saved(self, chapter: Chapter):
-        chapters = self.storage.get_all_chapters(story_id=self.current_story_id)
+        source_key = self.combo_source.currentData() if hasattr(self, "combo_source") else ""
+        chapters = self.storage.get_all_chapters(story_id=self.current_story_id, source=source_key)
         self.table_chapters.update_chapters(chapters)
 
     def on_crawl_finished(self, res):
-        chapters = self.storage.get_all_chapters(story_id=self.current_story_id)
+        source_key = self.combo_source.currentData() if hasattr(self, "combo_source") else ""
+        chapters = self.storage.get_all_chapters(story_id=self.current_story_id, source=source_key)
         self.table_chapters.update_chapters(chapters)
 
         is_success = res.get("success", False) if isinstance(res, dict) else True
@@ -484,6 +518,7 @@ class MainWindow(QMainWindow):
         )
         self.current_merger = merger
 
+        source_key = self.combo_source.currentData() if hasattr(self, "combo_source") else ""
         self.spell_worker = SpellCheckWorker(
             storage=self.storage,
             checker=self.spell_checker,
@@ -496,6 +531,7 @@ class MainWindow(QMainWindow):
             use_ai=self.chk_use_ai.isChecked(),
             ai_checker=self.ai_checker if self.chk_use_ai.isChecked() else None,
             story_title=self.current_profile.title,
+            source=source_key,
         )
         self.spell_worker.progress_changed.connect(self.on_progress)
         self.spell_worker.log_message.connect(self.log)
@@ -632,27 +668,78 @@ class MainWindow(QMainWindow):
         self.btn_resume.setEnabled(False)
         self.btn_stop.setEnabled(False)
 
-    def closeEvent(self, event):
+    def closeEvent(self, event, timeout_s: float = 6.0):
         """Dọn dẹp an toàn các worker thread khi người dùng đóng cửa sổ."""
-        # Kiểm tra nếu worker xuất video đang chạy
-        if hasattr(self, "video_tab") and self.video_tab.worker and self.video_tab.worker.isRunning():
+        has_video_work = hasattr(self, "video_tab") and self.video_tab.is_busy()
+        active_story_workers = [
+            w for w in [self.crawl_worker, self.spell_worker, self.export_worker]
+            if w and w.isRunning()
+        ]
+
+        if has_video_work or active_story_workers:
             ans = QMessageBox.question(
                 self,
                 "Tiến trình đang chạy",
-                "Tiến trình xuất video MP4 đang chạy trong nền.\nBạn có muốn hủy tác vụ và đóng ứng dụng ngay không?",
+                "Có tác vụ đang được thực thi trong nền.\nBạn có muốn hủy các tác vụ và đóng ứng dụng ngay không?",
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.No
             )
             if ans == QMessageBox.No:
                 event.ignore()
                 return
-            self.video_tab.worker.cancel()
-            self.video_tab.worker.wait(2000)
 
-        for worker in [self.crawl_worker, self.spell_worker, self.export_worker]:
-            if worker and worker.isRunning():
-                if hasattr(worker, "stop"):
-                    worker.stop()
-                worker.quit()
-                worker.wait(1000)
+            # Người dùng chọn hủy và đóng: Dừng an toàn tất cả worker
+            if hasattr(self, "video_tab"):
+                self.video_tab.stop_all_workers()
+
+            for w in active_story_workers:
+                if hasattr(w, "stop"):
+                    w.stop()
+                w.quit()
+
+            # Chờ có phối hợp bằng QCoreApplication.processEvents() tránh đơ giao diện
+            start = time.time()
+            while (time.time() - start) < timeout_s:
+                remaining = []
+                if hasattr(self, "video_tab"):
+                    if self.video_tab.worker and self.video_tab.worker.isRunning():
+                        remaining.append(self.video_tab.worker)
+                    if self.video_tab.meta_worker and self.video_tab.meta_worker.isRunning():
+                        remaining.append(self.video_tab.meta_worker)
+                for w in [self.crawl_worker, self.spell_worker, self.export_worker]:
+                    if w and w.isRunning():
+                        remaining.append(w)
+
+                if not remaining:
+                    break
+
+                for w in remaining:
+                    w.wait(50)
+                QCoreApplication.processEvents()
+
+            # Kiểm tra xem có worker nào chưa kịp thoát không
+            still_running = []
+            if hasattr(self, "video_tab"):
+                if self.video_tab.worker and self.video_tab.worker.isRunning():
+                    still_running.append("Xuất video")
+                if self.video_tab.meta_worker and self.video_tab.meta_worker.isRunning():
+                    still_running.append("Đọc metadata audio")
+            if self.crawl_worker and self.crawl_worker.isRunning():
+                still_running.append("Thu thập chương")
+            if self.spell_worker and self.spell_worker.isRunning():
+                still_running.append("Soát chính tả")
+            if self.export_worker and self.export_worker.isRunning():
+                still_running.append("Gộp tập")
+
+            if still_running:
+                QMessageBox.warning(
+                    self,
+                    "Chưa thể đóng ứng dụng",
+                    f"Các tác vụ sau chưa thể dừng hoàn toàn: {', '.join(still_running)}.\n"
+                    "Để bảo vệ tính toàn vẹn dữ liệu và tránh tiến trình mồ côi, cửa sổ chưa thể đóng.\n"
+                    "Vui lòng thử lại sau vài giây."
+                )
+                event.ignore()
+                return
+
         event.accept()

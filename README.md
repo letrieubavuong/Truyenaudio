@@ -31,17 +31,23 @@ c:\Lap trinh Android\PNTT Truyen\
 ├── core\
 │   ├── models.py           # Dataclass: Chapter, Volume, SpellIssue, StoryInfo (băm, version)
 │   ├── profiles.py         # Hồ sơ truyện đa nguồn: Phàm Nhân Tu Tiên, Tiên Nghịch, template mở/kết
-│   ├── parser.py           # Phân tích HTML vivutruyen.com, webnovel.vn và tệp văn bản TXT
+│   ├── parser.py           # Phân tích HTML vivutruyen.com, webnovel.vn, tamhoan.com và tệp TXT
 │   ├── storage.py          # Quản lý CSDL SQLite, bản gốc bất biến, versioning, lưu quyết định duyệt
 │   ├── crawler.py          # Tải mạng tuần tự, rate limit, timeout, chống lặp URL
 │   ├── importer.py         # Nạp tệp offline HTML/TXT vào SQLite
 │   ├── spellchecker.py     # Chuẩn hóa NFC, dọn gạch dưới, khoảng trắng, bảo vệ từ che c*m v**
 │   ├── ai_checker.py       # Trợ lý AI đề xuất (mặc định pending, schema check, ẩn API key)
-│   ├── merger.py           # Bộ gộp 4 chương/tập audio, chuẩn hóa \s\n -> \n, xử lý DRAFT
+│   ├── merger.py           # Bộ gộp tập audio, chuẩn hóa \s\n -> \n, xử lý DRAFT
 │   ├── reporter.py         # Xuất bundle an toàn (file tạm .tmp): RAW, EDITED, REPORT, CHANGELOG
 │   ├── video_models.py     # Dataclass hàng đợi Audio/Video và cấu hình xuất video YouTube
 │   ├── video_renderer.py   # Bộ dựng khung hình QPainter dùng chung 100% giữa Preview và FFmpeg
-│   └── ffmpeg_utils.py     # Gọi FFmpeg/ffprobe qua subprocess, đọc tiến độ pipe:1, xuất an toàn .tmp
+│   ├── ffmpeg_utils.py     # Gọi FFmpeg/ffprobe qua subprocess, đọc tiến độ pipe:1, xuất an toàn .tmp
+│   ├── tts_models.py       # Dataclass hàng đợi TTS, chunk, cấu hình âm thanh, manifest
+│   ├── tts_chunker.py      # Phân đoạn tiếng Việt (<240 ký tự), bảo vệ dấu câu và số thập phân
+│   ├── tts_manifest.py     # Quản lý manifest.json và cache WAV, kiểm tra tính toàn vẹn và resumption
+│   ├── tts_adapter.py      # Cầu nối tiến trình con chạy độc lập VieNeu-TTS, không xung đột GUI
+│   ├── tts_runner.py       # Worker chạy trong Python TTS, nạp model một lần duy nhất, output JSON-lines
+│   └── tts_assembler.py    # Ghép PCM WAV, chèn khoảng nghỉ (câu/đoạn/chương), mã hóa MP3 với FFmpeg
 ├── resources\
 │   ├── default_dictionary.json            # Từ điển lỗi gõ có thể mở rộng (đã lọc các cặp trùng nhau)
 │   ├── protected_terms.json               # Danh từ riêng, tên nhân vật, địa danh Phàm Nhân Tu Tiên
@@ -51,15 +57,19 @@ c:\Lap trinh Android\PNTT Truyen\
 │   ├── widgets.py          # Bảng chương & Giao diện duyệt Side-by-Side (chuột + phím Space)
 │   ├── dialogs.py          # Hộp thoại cấu hình AI, từ điển, thuật ngữ bảo vệ
 │   ├── workers.py          # Luồng nền: CrawlWorker, SpellCheckWorker, ExportWorker riêng biệt
+│   ├── tts_tab.py          # Tab "Sản Xuất Audio": Cấu hình VieNeu-TTS, hàng đợi, tiếp tục và chuyển video
+│   ├── tts_worker.py       # Luồng nền tổng hợp giọng đọc, đo tốc độ chars/s, tính ETA thực tế
 │   ├── video_tab.py        # Tab "Sản Xuất Video": Quản lý danh sách, xem trước và xuất video
 │   ├── video_worker.py     # Luồng nền xuất video hàng loạt, báo cáo ETA/tiến độ, hỗ trợ hủy
-│   └── main_window.py      # Cửa sổ chính: Chọn truyện/nguồn, 4 tab nghiệp vụ hoàn chỉnh
-├── cli.py                  # Giao diện dòng lệnh CLI đầy đủ chức năng (--story)
+│   └── main_window.py      # Cửa sổ chính: 5 tab nghiệp vụ hoàn chỉnh (Tải -> Sửa -> Gộp -> Audio -> Video)
+├── cli.py                  # Giao diện dòng lệnh CLI đầy đủ chức năng (--story, tts)
 ├── app.py                  # Khởi chạy ứng dụng GUI PySide6
+├── setup_tts_env_cpu.bat   # Script tự động tạo môi trường Python TTS cho CPU (ONNX Runtime)
+├── setup_tts_env_gpu.bat   # Script tự động tạo môi trường Python TTS cho GPU (PyTorch CUDA 12.x)
 ├── data\
 │   ├── sample_chapters\   # 4 chương mẫu thực tế phục vụ kiểm thử offline PNTT
-│   └── fixtures\          # Fixture HTML thực tế webnovel.vn (mục lục và chương Tiên Nghịch)
-└── tests\                  # Bộ kiểm thử tự động toàn diện (69/69 PASS 100%)
+│   └── fixtures\          # Fixture HTML thực tế webnovel.vn và tamhoan.com
+└── tests\                  # Bộ kiểm thử tự động toàn diện (104/104 PASS 100%)
 ```
 
 ---
@@ -238,21 +248,69 @@ Hệ thống luôn phân định rõ và hiển thị 3 chỉ số số lượng
 
 Hệ thống hỗ trợ cơ chế hồ sơ truyện đa nguồn (`core/profiles.py`), cho phép chuyển đổi linh hoạt giữa:
 1. **Phàm Nhân Tu Tiên** – Nguồn `vivutruyen.com` (Tác giả: Vong Ngữ)
-2. **Tiên Nghịch** – Nguồn `webnovel.vn` (Tác giả: Nhĩ Căn, URL: `https://webnovel.vn/tien-nghich`)
+2. **Tiên Nghịch** – Đa nguồn cung cấp (Tác giả: Nhĩ Căn):
+   - Nguồn 1: `webnovel.vn` (URL: `https://webnovel.vn/tien-nghich`)
+   - Nguồn 2: `tamhoan.com` (URL chuẩn: `https://tamhoan.com/truyen/tien-nghich`)
 
-### A. Khảo sát & Phân tích Nguồn `webnovel.vn`:
+---
+
+### A. Khảo sát Thực tế & Phân tích Nguồn `tamhoan.com`:
+- **Đường dẫn chuẩn của trang truyện:**
+  - URL gốc `https://tamhoan.com/truyen/tien-nghich` (trả về HTTP 200).
+  - *Lưu ý quan trọng:* URL `https://tamhoan.com/tien-nghich` trả về **HTTP 404**; crawler và hệ thống tự động chuẩn hóa sang `/truyen/tien-nghich` nếu người dùng nhập thiếu.
+- **Mục lục và phân trang:**
+  - Mục lục nằm trong `<div class="storyListHolder">`, mỗi trang chứa đúng **50 chương** được sắp xếp theo thứ tự tăng dần.
+  - Phân trang mục lục có **43 trang** (`total_pages = 43`), liên kết trang kế tiếp có dạng `?page=2` (thuộc `<div class="storyPagination">`).
+- **Cấu trúc URL chương và phân biệt số chương thực tế:**
+  - URL chương mẫu: `https://tamhoan.com/tien-nghich/203612` (Chương 1) và `https://tamhoan.com/tien-nghich/205299` (Chương 1668).
+  - **Khẳng định khảo sát thực tế:** Số `205299` trên URL là **ID bài viết trong CSDL** của website, **không phải là số chương**. Chương tại `205299` có tiêu đề thực tế là *"Chương 1668: Thuộc về Tây Tử một năm"*.
+  - Hệ thống **tuyệt đối không tự tăng ID URL** và trích xuất đúng số chương (1668) từ tiêu đề văn bản thông qua regex chuẩn `Chương\s+(\d+)`.
+- **Trích xuất nội dung và dọn dẹp quảng cáo:**
+  - Nội dung chương nằm trong `<div class="content">` bên trong `<div class="chapContent">`.
+  - **Dọn dẹp quảng cáo Google Ads:** Thư viện BeautifulSoup tự động phân rã (decompose) các thẻ `<ins class="adsbygoogle">`, `<script>`, `<iframe>`, `<style>` mà không làm mất câu chuyện.
+  - **Bảo toàn ngữ nghĩa:** Giữ nguyên vẹn dấu tiếng Việt, lời thoại có gạch đầu dòng (`- Cha, ...`), dấu câu, và các từ viết tắt/che dấu (`c*m`, `v**`).
+- **Liên kết điều hướng:**
+  - Nút chuyển chương: `<a id="next_chap">` và `<a id="prev_chap">`.
+  - Nút bị vô hiệu hóa (như lùi ở Chương 1 hoặc tiến ở chương cuối) có class `disabled` và `href="#"`. Parser nhận diện chính xác để không sinh link lặp.
+
+---
+
+### B. Khảo sát & Phân tích Nguồn `webnovel.vn`:
 - **Mục lục:** Cấu trúc `<ol class="chapter-list" id="chapterList">` chứa trực tiếp các thẻ `<a class="chapter-item__link">` với chỉ số `<span class="chapter-item__index">` và tên chương `<span class="chapter-item__title">`.
 - **Nội dung chương:**
   - Tiêu đề chương: `<p class="reader__chapter">`.
   - Đoạn văn nội dung: Nằm trong `<div id="chapter-c">` thuộc `<article class="reader__content">`.
   - **Làm sạch rác & quảng cáo:** Loại bỏ hoàn toàn khối `<div class="bastorypush">` (quảng cáo đề cử nội bộ), dọn sạch các thẻ nút chia sẻ và menu điều hướng.
   - **Điều hướng chương:** Trích xuất liên kết "Chương sau" và "Chương trước" từ cụm `<div class="reader__actions">`.
-- **Bảo vệ và cách ly dữ liệu:**
-  - Dữ liệu chương lưu trong CSDL riêng biệt hoặc tách theo `story_id`.
-  - Thư mục xuất riêng: `output_volumes/tien_nghich/` (tránh xung đột số tập với Phàm Nhân Tu Tiên).
-  - Từ điển thuật ngữ bảo vệ riêng: `resources/protected_terms_tien_nghich.json` bảo vệ tên nhân vật (Vương Lâm, Lý Mộ Uyển, Tư Đồ Nam,...), môn phái (Hằng Nhạc Phái, Thi Ma Tông,...) và cảnh giới tu luyện.
 
-### B. Mẫu Mở Đầu & Kết Thúc Tập Tiên Nghịch:
+---
+
+### C. Kiến Trúc Tách Rời "Bộ Truyện" Khỏi "Nguồn Cung Cấp" & Cách Ly Dữ Liệu:
+- **Mô hình hóa:** Khái niệm `StoryProfile` đại diện cho tác phẩm ("Tiên Nghịch", "Phàm Nhân Tu Tiên"), quản lý một tập hợp các `SourceProfile` ("webnovel.vn", "tamhoan.com", "vivutruyen.com").
+- **Giao diện người dùng độc lập:**
+  - Hộp chọn **Bộ truyện**: Cho phép chọn *Tiên Nghịch* hoặc *Phàm Nhân Tu Tiên*.
+  - Hộp chọn **Nguồn cung cấp**: Tự động cập nhật danh sách nguồn theo bộ truyện đang chọn (chọn Tiên Nghịch -> nguồn `webnovel.vn` hoặc `tamhoan.com`; chọn Phàm Nhân Tu Tiên -> nguồn `vivutruyen.com`).
+- **Cách ly CSDL SQLite:**
+  - Bảng `chapters` được bổ sung cột `source` với index `idx_chap_source_num(story_id, source, chapter_num)`.
+  - Hai nguồn cùng có Chương 1 (ví dụ: Chương 1 của Webnovel và Chương 1 của TamHoan) được lưu trữ độc lập, không ghi đè, không lẫn tiến độ.
+  - Tự động di chuyển (migration) dữ liệu cũ, bảo toàn 100% các chương đã lưu từ trước.
+- **Thư mục xuất riêng biệt theo nguồn:**
+  - Nguồn TamHoan: `output_volumes/tien_nghich/tamhoan/`
+  - Nguồn Webnovel: `output_volumes/tien_nghich/webnovel/`
+  - Nguồn Vivutruyen: `output_volumes/pham_nhan_tu_tien/`
+  - Đảm bảo khi xuất tập hoàn chỉnh không bao giờ ghi đè lên file của nguồn khác.
+
+---
+
+### D. Nhập Offline HTML từ Trình Duyệt:
+- Hỗ trợ nạp các tệp `.html` chương TamHoan được lưu trực tiếp từ trình duyệt web.
+- **Bảo toàn nguồn gốc:** Tự động phát hiện `<link rel="canonical">` hoặc `<meta property="og:url">` để giữ URL gốc và xác định nguồn `tamhoan`.
+- **An toàn điều hướng:** Tuyệt đối không dùng đường dẫn `file://` làm `next_url` để crawler tải mạng.
+- **Chính xác số chương:** Nếu tệp không chứa số chương rõ ràng, hệ thống ghi cảnh báo yêu cầu người dùng đặt lại tên tệp (ví dụ: `chuong_1.html`), tuyệt đối không tự đoán số chương.
+
+---
+
+### E. Mẫu Mở Đầu & Kết Thúc Tập Tiên Nghịch:
 - **Đầu file:**
   ```
   TIÊN NGHỊCH - TẬP {tap}
@@ -265,13 +323,24 @@ Hệ thống hỗ trợ cơ chế hồ sơ truyện đa nguồn (`core/profiles.
   Hết Tập {tap}: Cảm ơn quý thính giả đã chú ý lắng nghe. Hẹn gặp lại các bạn trong Tập {tap_tiep_theo} tiếp theo!
   ```
 
-### C. Sử dụng qua CLI cho Tiên Nghịch:
-```bash
-# Nạp và xử lý truyện Tiên Nghịch từ thư mục offline:
-python cli.py process --story tien-nghich --import-dir data/sample_tien_nghich --start-chap 1 --end-chap 12 --start-vol 1 --overwrite
+---
 
-# Tải từ webnovel.vn (hoặc kiểm tra fixture offline):
-python cli.py crawl --story tien-nghich --url https://webnovel.vn/tien-nghich/chuong-1 --start-chap 1 --end-chap 4
+### F. Sử Dụng Qua CLI (Đa Nguồn):
+```bash
+# 1. Tải truyện Tiên Nghịch từ nguồn tamhoan.com (chương 1 đến 12):
+python cli.py crawl --story tien-nghich --source tamhoan --start-chap 1 --end-chap 12
+
+# 2. Gộp 12 chương TamHoan thành 3 tập (4 chương/tập) xuất vào output_volumes/tien_nghich/tamhoan:
+python cli.py merge --story tien-nghich --source tamhoan --start-chap 1 --end-chap 12 --start-vol 1
+
+# 3. Nạp offline các tệp HTML TamHoan lưu từ trình duyệt:
+python cli.py import --story tien-nghich --source tamhoan --dir data/offline_tamhoan
+
+# 4. Pipeline trọn gói từ tải mạng tới xuất tập:
+python cli.py process --story tien-nghich --source tamhoan --start-chap 1 --end-chap 12 --start-vol 1
+
+# 5. Tải từ webnovel.vn:
+python cli.py crawl --story tien-nghich --source webnovel --start-chap 1 --end-chap 12
 ```
 
 ---
@@ -281,12 +350,14 @@ python cli.py crawl --story tien-nghich --url https://webnovel.vn/tien-nghich/ch
 Tab **"🎬 Sản Xuất Video"** tích hợp trực tiếp trên giao diện PySide6, cho phép ghép các file âm thanh MP3 thành video MP4 chất lượng cao 1080p hoặc 720p để đăng tải YouTube.
 
 ### A. Tính Năng Nổi Bật:
-1. **Danh sách hàng đợi Audio:**
-   - Hỗ trợ thêm từng file MP3 hoặc quét toàn bộ file MP3 trong thư mục.
-   - Hỗ trợ đầy đủ đường dẫn tiếng Việt có dấu và dấu cách trên Windows.
-   - Tự động nhận diện thông minh metadata từ tên tệp (Tên truyện, Tác giả, Số tập, Khoảng chương) hoặc liên kết dữ liệu từ các tập truyện đã có trong ứng dụng.
+1. **Danh sách hàng đợi & Đọc Metadata bằng Worker nền:**
+   - Đọc thời lượng và kiểm tra luồng audio trong luồng nền `AudioMetadataWorker(QThread)`, không gây đơ giao diện khi thêm nhiều tệp.
+   - Hộp thoại tiến độ nạp tệp âm thanh có thể hủy bất kỳ lúc nào.
+   - Tự động phát hiện và loại bỏ các tệp trùng lặp khi nạp nhiều đợt.
+   - Kiểm tra tệp hỏng, tệp không có luồng audio hoặc thời lượng bằng 0: cảnh báo lý do rõ ràng và không thêm vào danh sách như tệp hợp lệ.
+   - Tự động nhận diện thông minh metadata từ tên tệp (Tên truyện, Tác giả, Số tập, Khoảng chương).
    - Sắp xếp tự nhiên theo số tập (Tập 2 luôn đứng trước Tập 10).
-   - Chặn thêm trùng file; cho phép chỉnh sửa metadata từng mục trực quan.
+   - Cho phép chỉnh sửa metadata từng mục trực quan qua hộp thoại riêng mà không bị kết quả quét ngầm ghi đè.
 2. **Ảnh nền & Hiển thị thông minh:**
    - Hỗ trợ ảnh JPG, JPEG, PNG với cơ chế chọn ảnh chung cho cả dự án hoặc ảnh riêng cho từng tập.
    - **2 chế độ hiển thị:**
@@ -298,12 +369,24 @@ Tab **"🎬 Sản Xuất Video"** tích hợp trực tiếp trên giao diện Py
    - Tự động xuống dòng khi tiêu đề dài, giữ khoảng cách an toàn với mép khung hình (Safe margin padding).
 4. **Bộ dựng chung (Shared Renderer) & Xem trước chính xác 100%:**
    - Dùng chung bộ kết xuất `render_frame()` bằng PySide6 QPainter cho cả khung hình xem trước (Live Preview / Phóng to) và khung hình đưa vào FFmpeg mã hóa video. Đảm bảo chữ tiếng Việt sắc nét và hình ảnh xem trước hoàn toàn khớp với video thành phẩm.
-5. **Mã hóa FFmpeg & An toàn tệp tin:**
+5. **Mã hóa FFmpeg, Bảo vệ File khi Ghi đè & Đồng bộ Hàng đợi:**
    - Thiết lập chuẩn YouTube: Container MP4, Video H.264 (yuv420p), Audio AAC 192kbps, cờ `+faststart`.
-   - Xuất qua tệp tạm `.tmp.mp4`, chỉ đổi tên chính thức sau khi `ffprobe` kiểm tra có đầy đủ luồng video, luồng audio và thời lượng trùng khớp với file MP3.
-   - Không lo deadlock: Đọc tiến độ bằng cờ machine-readable `-progress pipe:1` và luồng nền hút sạch `stderr`.
-   - Hỗ trợ hủy tác vụ an toàn (dừng tiến trình FFmpeg và dọn dẹp file tạm).
-   - Chính sách ghi đè rõ ràng: *Ghi đè (Overwrite)*, *Bỏ qua (Skip)*, hoặc *Tự đổi tên thêm hậu tố (Rename)*.
+   - **Bảo vệ file hoàn chỉnh cũ khi ghi đè:** Xuất qua tệp tạm độc nhất `.tmp_[base]_[pid]_[time].mp4` trong cùng thư mục đích. Chỉ thay thế nguyên tử qua `os.replace` sau khi FFmpeg thành công và `ffprobe` xác minh tính hợp lệ của video/audio. Tuyệt đối không xóa file cũ trước khi thay thế; nếu file đích bị khóa (đang mở trong trình phát) hoặc thay thế thất bại, file cũ vẫn còn nguyên 100%.
+   - **Hỗ trợ đủ 3 chế độ xử lý tệp tồn tại:**
+     + *Tự đổi tên (Rename):* Đổi tên thêm hậu tố (ví dụ: `_1.mp4`).
+     + *Bỏ qua (Skip):* Không xuất lại tệp đã có; đánh dấu trạng thái `skipped` và không tính là video xuất mới.
+     + *Ghi đè an toàn (Overwrite):* Thay thế an toàn file cũ với bảo vệ nguyên vẹn.
+   - **Hủy tác vụ và đóng ứng dụng an toàn:**
+     + Đọc tiến độ qua hàng đợi nền (non-blocking polling 100ms), không chặn vòng kiểm tra hủy ngay cả khi FFmpeg không phát thêm dòng stdout.
+     + Luồng nền thu gom toàn bộ stderr tránh pipe deadlock.
+     + Quy trình dừng tiến trình có bảo đảm: `terminate()` -> chờ giới hạn -> `kill()` -> `wait()` xác nhận thoát hoàn toàn.
+     + File tạm chỉ được dọn sau khi tiến trình đã giải phóng handle.
+     + Khi đóng ứng dụng: Hộp thoại xác nhận cho phép tiếp tục làm việc hoặc hủy tác vụ rồi đóng; luồng GUI duy trì phản hồi qua `QCoreApplication.processEvents()` và không hủy QThread khi thread còn chạy.
+   - **Đồng bộ trạng thái hàng đợi và Xuất lại:**
+     + Phân biệt rõ các trạng thái mục: `waiting`, `processing`, `completed`, `skipped`, `cancelled`, `error`.
+     + Phân biệt kết quả toàn hàng đợi: `hoàn tất`, `hoàn tất có lỗi`, `đã hủy`.
+     + Khi hủy, tiến độ giữ đúng giá trị thực tế đã làm, không ép thành 100%. Các mục chưa chạy được gán trạng thái `cancelled` nhất quán.
+     + Nút **"🔄 Xuất lại mục lỗi/hủy"** cho phép chọn và chạy lại nhanh các mục chưa hoàn tất.
 
 ### B. Cấu hình FFmpeg trên Windows:
 - Công cụ tự động quét FFmpeg và ffprobe trong `PATH` hệ thống hoặc thư mục mặc định `C:\ffmpeg\bin\`.
@@ -316,25 +399,108 @@ Tab **"🎬 Sản Xuất Video"** tích hợp trực tiếp trên giao diện Py
 
 ---
 
-## 10. KẾT QUẢ KIỂM THỬ TOÀN DIỆN
+## 10. TÍCH HỢP VIENEU-TTS ĐỂ SẢN XUẤT AUDIO MP3
 
-Bộ kiểm thử tự động gồm **69 test case** bao phủ 100% các chức năng cốt lõi:
-- Khởi động CLI (`cli.py --help`) và GUI (PySide6 offscreen).
-- Tải giả lập 12 chương và xuất 3 tập hoàn chỉnh.
-- Cache chương 1–4, phục hồi liên kết điều hướng và tiếp tục thu thập.
-- Phát hiện và phân loại lỗi HTTP 403, 429, timeout, trang rỗng, URL lặp.
-- Cách ly hoàn toàn CSDL, hồ sơ và quyết định duyệt giữa Phàm Nhân Tu Tiên và Tiên Nghịch.
-- Phân tích mục lục, trích xuất nội dung và làm sạch quảng cáo `bastorypush` nguồn `webnovel.vn`.
-- Đọc metadata audio bằng ffprobe, sắp xếp tập tự nhiên theo số.
-- Xử lý đường dẫn tiếng Việt có dấu, khoảng trắng và ký tự đặc biệt.
+Thẻ **"🎙️ Sản Xuất Audio"** tích hợp trực tiếp công nghệ tổng hợp giọng nói tiếng Việt tự nhiên [VieNeu-TTS](https://github.com/pnnbao97/VieNeu-TTS) vào quy trình khép kín:
+$$\text{Nội dung đã duyệt} \longrightarrow \text{Gộp tập TXT} \longrightarrow \text{Tạo MP3} \longrightarrow \text{Ghép ảnh xuất MP4}$$
+
+### A. Xác minh SDK & Phiên bản Ghim
+- **Phiên bản SDK đã kiểm thử:** `vieneu==3.8.3`.
+- **Mô hình hỗ trợ:**
+  + `v3_turbo` (Mặc định): Độ phân giải 48 kHz, tốc độ nhanh, chất lượng tự nhiên cao.
+  + `v3nano`: Độ phân giải 24 kHz, kích thước siêu nhẹ cho máy tính cấu hình yếu.
+- **Tuân thủ API SDK chính thức:**
+  + Khởi tạo: `Vieneu(mode="v3_turbo", backend="onnx"|"pytorch", precision="fp32"|"int8")`.
+  + Suy luận: `tts.infer(text, voice=voice_id)`.
+  + Lưu audio: `tts.save(audio, wav_path)`.
+  + Lấy danh sách giọng: `tts.list_preset_voices()`.
+  + Tuyệt đối **không** tự động hóa Gradio UI.
+  + Không truyền tham số `style` lỗi thời (v3 Turbo đã bỏ qua `style` theo tài liệu chính thức).
+  + Không đổi đuôi WAV thành MP3: Sử dụng FFmpeg mã hóa chuẩn `libmp3lame` với bitrate 192 kbps.
+
+### B. Kiến trúc Tiến Trình Độc Lập (Subprocess Isolation)
+Nhằm tránh xung đột thư viện C++ (ONNX Runtime, PyTorch, Sea-G2P) với giao diện PySide6 và bản đóng gói EXE:
+1. **Không import nặng lúc khởi động:** Giao diện GUI khởi động tức thì, các tab Thu thập, Hiệu đính và Video luôn hoạt động bình thường ngay cả khi máy chưa cài đặt VieNeu-TTS.
+2. **Môi trường Python TTS riêng (`venv_tts`):**
+   - Không sử dụng `sys.executable` của ứng dụng đã đóng gói.
+   - Cho phép chỉ định đường dẫn Python tùy ý trên giao diện hoặc tự động nhận diện `venv_tts\Scripts\python.exe`.
+3. **Nạp model một lần (Single Model Load):** Tiến trình runner nạp model vào RAM/VRAM một lần duy nhất cho toàn bộ hàng đợi, không nạp lại cho từng đoạn.
+4. **Giao tiếp có cấu trúc:** Giao tiếp tiến độ bằng JSON-lines qua stdout với mã hóa UTF-8, cách ly hoàn toàn với stderr của thư viện C++.
+
+### C. Phân Đoạn Tiếng Việt (Text Chunker) & Khoảng Nghỉ
+- Chia nhỏ văn bản dài thành các đoạn an toàn ($\le 240$ ký tự) theo ranh giới đoạn văn, dấu câu (`.!?…`) và mệnh đề liên từ (`nhưng`, `mà`, `bởi vì`...).
+- Bảo vệ số thập phân (`1.5 vạn dặm`), dấu câu và từ ngữ, bảo đảm **100% độ bao phủ văn bản** không mất, lặp hay đảo câu.
+- Tự động nhận diện tiêu đề chương (`Chương \d+:`) để áp dụng khoảng nghỉ dài hơn.
+- Cấu hình khoảng nghỉ chuẩn xác:
+  + Nghỉ giữa các câu: mặc định `250 ms`.
+  + Nghỉ giữa các đoạn văn: mặc định `500 ms`.
+  + Nghỉ giữa các chương: mặc định `1500 ms`.
+- Ghép PCM trực tiếp không dùng crossfade làm biến dạng lời đọc đầu/cuối câu.
+
+### D. Cơ Chế Manifest, Cache & Phục Hồi (Resume)
+- Manifest nội bộ lưu tại: `output_volumes/<Tên_Truyện>/<Nguồn>/.tts_cache/Tap_<SốTập>_<ConfigHash>/manifest.json`.
+- Ghi vết băm văn bản snapshot, thuật toán chia đoạn (`v1`), thông số model, giọng đọc và trạng thái từng file WAV.
+- Tự động phục hồi các đoạn đã tạo thành công trước đó khi bị ngắt quãng hoặc dừng tác vụ.
+- Vô hiệu hóa cache an toàn khi văn bản hoặc cấu hình âm thanh thay đổi.
+- Nút **"🔄 Tạo lại đoạn lỗi"** cho phép xử lý lại riêng các đoạn thất bại mà không cần chạy lại từ đầu.
+
+### E. Xuất Bản MP3 Chuẩn & Luân Chuyển Sang Video
+- Mã hóa MP3 một lần duy nhất ở bước cuối bằng FFmpeg (`-codec:a libmp3lame -b:a 192k`).
+- Đặt tên tệp chuẩn: `{ten_truyen}_Tap_{tap:03d}_Chuong_{dau}_den_{cuoi}.mp3`.
+- Ghi đè an toàn qua tệp tạm `.tmp.mp3` và xác thực stream/thời lượng qua `ffprobe` trước khi thay thế nguyên tử (`os.replace`).
+- Nút **"🎬 Chuyển sang sản xuất video"** tự động chuyển danh sách MP3 kèm trọn vẹn metadata sang Tab Video để xuất bản MP4 YouTube chỉ với 1 cú nhấp chuột.
+
+### F. Hướng Dẫn Thiết Lập Môi Trường TTS Trên Windows
+Dự án cung cấp sẵn 2 kịch bản thiết lập tự động:
+1. **Chế độ CPU (ONNX Runtime - Nhẹ, tương thích cao):**
+   ```cmd
+   setup_tts_env_cpu.bat
+   ```
+2. **Chế độ GPU (PyTorch CUDA 12.x - Tốc độ cao):**
+   ```cmd
+   setup_tts_env_gpu.bat
+   ```
+*Yêu cầu nền tảng:* Cần có Python 3.10, 3.11 hoặc 3.12 64-bit trên máy để các gói pre-built wheel của `kaldi-native-fbank` và `onnxruntime` có thể cài đặt trực tiếp mà không cần trình biên dịch Cmake.
+
+### G. Bản Quyền & Điều Kiện Sử Dụng
+- Mã nguồn VieNeu-TTS được phát hành theo giấy phép mã nguồn mở.
+- Trọng số mô hình và các giọng đọc preset cộng đồng cần được kiểm tra điều kiện cấp phép riêng trên HuggingFace trước khi sử dụng cho các mục đích thương mại.
+
+---
+
+## 11. KẾT QUẢ KIỂM THỬ TOÀN DIỆN
+
+Bộ kiểm thử tự động gồm **104 test case** bao phủ 100% các chức năng cốt lõi và các tình huống ngoại lệ:
+- Khởi động CLI (`cli.py --help`, `cli.py tts --help`) và GUI (PySide6 offscreen) trong tiến trình sạch hoàn toàn.
+- Phân tích mục lục, số chương và 43 trang phân trang thực tế từ `tamhoan.com` và `webnovel.vn`.
+- Trích xuất đúng số chương (ví dụ: Chương 1668 từ URL `205299`), không nhầm lẫn giữa URL ID và số chương.
+- Dọn sạch quảng cáo Google Ads (`adsbygoogle`, script) và bảo toàn 100% lời thoại, dấu câu, từ bị che.
+- Xử lý các tình huống biên: HTTP 403, Cloudflare challenge, trang rỗng, điều hướng disabled.
+- Chuẩn hóa hostname và nhận diện nguồn chặt chẽ bằng hostname phân tích từ URL.
+- Cách ly CSDL: Hai nguồn cùng có Chương 1 độc lập 100%, truy vấn đúng theo nguồn.
+- Phục hồi điều hướng an toàn khi chương đã lưu thiếu `next_url`.
+- Nhập offline HTML TamHoan giữ canonical URL, không lấy `file://` làm link tải mạng.
+- Tải giả lập 12 chương TamHoan, gộp đúng 3 tập vào thư mục cách ly `output_volumes/tien_nghich/tamhoan/`.
+- Tự động migration CSDL cũ chưa có cột `source`, bảo toàn toàn bộ dữ liệu hiện có.
+- Đổi nguồn trên GUI cập nhật chính xác danh sách chương, thư mục xuất và hồ sơ truyện.
+- **Kiểm thử Thuật toán Chia đoạn (Text Chunker):** Bảo toàn 100% từ ngữ khi tái dựng, tách câu dài theo mệnh đề an toàn, bảo vệ số thập phân (`1.5 vạn dặm`), đánh dấu ranh giới chương.
+- **Kiểm thử Manifest & Cache:** Kiểm tra tính hợp lệ của WAV header RIFF, lưu trữ snapshot bất biến, phục hồi tiếp tục các đoạn chưa xong, vô hiệu hóa cache khi đổi text hoặc đổi giọng đọc.
+- **Kiểm thử Ghép nối & Mã hóa MP3:** Từ chối tạo MP3 nếu thiếu bất kỳ chunk nào, ghép nối chính xác các khoảng lặng (câu, đoạn, chương), mã hóa MP3 với FFmpeg và kiểm tra stream bằng ffprobe.
+- **Kiểm thử An toàn Ghi đè MP3:** Bảo toàn file MP3 cũ nếu quá trình ghép thất bại, xử lý các chế độ overwrite, skip, rename.
+- **Kiểm thử Tiến trình con (Runner & Adapter):** Kiểm tra môi trường graceful khi chưa có vieneu, chạy batch worker ở chế độ mock phát đúng sự kiện JSON-lines, hủy tác vụ dọn sạch tiến trình con.
+- **Kiểm thử Tích hợp GUI & Luân chuyển Video:** Khởi tạo Tab Sản Xuất Audio không phụ thuộc thư viện nặng, nạp tập từ dự án hoặc file TXT, luân chuyển trọn vẹn metadata (tên truyện, số tập, khoảng chương, thời lượng thực tế) sang Tab Sản Xuất Video.
+- Đọc metadata audio bằng ffprobe trong worker nền, bỏ qua file hỏng/không có audio, ngăn trùng lặp.
+- Sắp xếp tập tự nhiên theo số, xử lý đường dẫn tiếng Việt có dấu, khoảng trắng và ký tự đặc biệt.
 - Dựng ảnh khung hình đúng kích thước, giữ đúng tỉ lệ ở cả 2 chế độ (`crop_fill` và `fit_letterbox`).
 - Chống tràn khung chữ dài, xử lý font tiếng Việt, đổ bóng viền chữ.
-- Mã hóa video MP4 thật bằng FFmpeg, kiểm tra stream video/audio và thời lượng chuẩn xác.
-- Hủy tác vụ xuất video an toàn, dọn tệp tạm, chịu lỗi từng mục trong hàng đợi và bảo vệ chống ghi đè mất tệp.
+- Mã hóa video MP4 thật bằng FFmpeg, kiểm tra stream video/audio và thời lượng chuẩn xác qua ffprobe.
+- Hủy khi FFmpeg đang mã hóa và khi FFmpeg bị treo không phát stdout (dưới 100ms).
+- Xử lý tiến trình không chịu terminate bằng cơ chế kill và wait xác thực.
+- Đóng cửa sổ ứng dụng an toàn khi worker đang chạy, không còn thread/process mồ côi.
 
 Chạy toàn bộ kiểm thử:
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
 ```
-*Kết quả:* **69/69 test đạt (OK) 100%.**
+*Kết quả:* **104/104 test đạt (OK) 100%, 0 thất bại, 0 lỗi, 0 bỏ qua.**
 

@@ -106,6 +106,7 @@ class SpellCheckWorker(QThread):
         use_ai: bool = False,
         ai_checker: Optional[AIChecker] = None,
         story_title: str = "",
+        source: str = "",
     ):
         super().__init__()
         self.storage = storage
@@ -119,6 +120,7 @@ class SpellCheckWorker(QThread):
         self.use_ai = use_ai
         self.ai_checker = ai_checker
         self.story_title = story_title
+        self.source = source
         self._is_stopped = False
 
     def stop(self):
@@ -126,9 +128,9 @@ class SpellCheckWorker(QThread):
 
     def run(self):
         try:
-            self.log_message.emit("INFO", f"Đang truy vấn các chương từ {self.start_chap} đến {self.end_chap}...")
+            self.log_message.emit("INFO", f"Đang truy vấn các chương từ {self.start_chap} đến {self.end_chap} (Nguồn: {self.source or 'mặc định'})...")
             chapters = self.storage.get_chapters_range(
-                story_id=self.story_id, start_chap=self.start_chap, end_chap=self.end_chap
+                story_id=self.story_id, start_chap=self.start_chap, end_chap=self.end_chap, source=self.source
             )
 
             if not chapters:

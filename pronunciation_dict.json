@@ -1,0 +1,52 @@
+[
+  {
+    "source": "PNTT",
+    "target": "Phàm Nhân Tu Tiên",
+    "case_sensitive": true
+  },
+  {
+    "source": "TN",
+    "target": "Tiên Nghịch",
+    "case_sensitive": true
+  },
+  {
+    "source": "chap",
+    "target": "chương",
+    "case_sensitive": false
+  },
+  {
+    "source": "vol",
+    "target": "tập",
+    "case_sensitive": false
+  },
+  {
+    "source": "admin",
+    "target": "quản trị viên",
+    "case_sensitive": false
+  },
+  {
+    "source": "2k",
+    "target": "hai nghìn",
+    "case_sensitive": false
+  },
+  {
+    "source": "1k",
+    "target": "một nghìn",
+    "case_sensitive": false
+  },
+  {
+    "source": "mc",
+    "target": "nhân vật chính",
+    "case_sensitive": false
+  },
+  {
+    "source": "fb",
+    "target": "phây búc",
+    "case_sensitive": false
+  },
+  {
+    "source": "yt",
+    "target": "du túp",
+    "case_sensitive": false
+  }
+]

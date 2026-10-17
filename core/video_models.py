@@ -150,3 +150,30 @@ def parse_filename_metadata(filename: str) -> Dict[str, Any]:
         res["author"] = "Nhĩ Căn"
 
     return res
+
+
+@dataclass
+class EncodeResult:
+    """Kết quả mã hóa video, phân biệt rõ xuất thành công hay bỏ qua."""
+    output_path: str = ""
+    status: str = "completed"  # 'completed' hoặc 'skipped'
+    message: str = ""
+
+    def __str__(self) -> str:
+        return self.output_path
+
+    def __fspath__(self) -> str:
+        return self.output_path
+
+    def endswith(self, suffix, *args) -> bool:
+        return self.output_path.endswith(suffix, *args)
+
+    def startswith(self, prefix, *args) -> bool:
+        return self.output_path.startswith(prefix, *args)
+
+    def __eq__(self, other) -> bool:
+        if isinstance(other, str):
+            return self.output_path == other
+        if isinstance(other, EncodeResult):
+            return self.output_path == other.output_path and self.status == other.status
+        return False

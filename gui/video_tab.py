@@ -15,13 +15,13 @@ from PySide6.QtWidgets import (
     QComboBox, QColorDialog, QDialog, QProgressBar, QAbstractItemView,
     QDialogButtonBox, QFormLayout
 )
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import Qt, QTimer, Signal, QCoreApplication
 from PySide6.QtGui import QColor, QFont, QPixmap, QImage, QIcon
 
 from core.video_models import AudioVideoItem, VideoConfig, parse_filename_metadata
 from core.video_renderer import render_frame
 from core.ffmpeg_utils import find_ffmpeg, check_ffmpeg_installed, probe_media
-from gui.video_worker import VideoExportWorker
+from gui.video_worker import VideoExportWorker, AudioMetadataWorker, ExportSummary
 
 
 class ItemEditDialog(QDialog):
@@ -119,6 +119,8 @@ class VideoProductionTab(QWidget):
         self.config = VideoConfig()
         self.items: List[AudioVideoItem] = []
         self.worker: Optional[VideoExportWorker] = None
+        self.meta_worker: Optional[AudioMetadataWorker] = None
+        self.import_progress_dialog: Optional[QProgressDialog] = None
         self._current_preview_image: Optional[QImage] = None
 
         self.init_ui()
@@ -304,6 +306,15 @@ class VideoProductionTab(QWidget):
         self.btn_check_ffmpeg.clicked.connect(self.test_ffmpeg)
         bot_layout.addWidget(self.btn_check_ffmpeg, 0, 4)
 
+        # Chế độ xử lý tệp trùng / đã tồn tại
+        bot_layout.addWidget(QLabel("Xử lý tệp đã tồn tại:"), 1, 0)
+        self.combo_overwrite = QComboBox()
+        self.combo_overwrite.addItem("Tự đổi tên nếu trùng (vd: _1.mp4)", "rename")
+        self.combo_overwrite.addItem("Bỏ qua nếu tệp đã tồn tại", "skip")
+        self.combo_overwrite.addItem("Ghi đè an toàn tệp cũ", "overwrite")
+        self.combo_overwrite.currentIndexChanged.connect(self.on_overwrite_mode_changed)
+        bot_layout.addWidget(self.combo_overwrite, 1, 1, 1, 2)
+
         # Hàng nút hành động
         act_layout = QHBoxLayout()
         self.btn_export_selected = QPushButton("▶ Xuất mục đã chọn")
@@ -313,6 +324,10 @@ class VideoProductionTab(QWidget):
         self.btn_export_all = QPushButton("⏩ Xuất tất cả")
         self.btn_export_all.setStyleSheet("background-color: #2e7d32; color: white; font-weight: bold; padding: 6px 16px;")
         self.btn_export_all.clicked.connect(self.export_all)
+
+        self.btn_retry_failed = QPushButton("🔄 Xuất lại mục lỗi/hủy")
+        self.btn_retry_failed.setStyleSheet("background-color: #e65100; color: white; font-weight: bold; padding: 6px 14px;")
+        self.btn_retry_failed.clicked.connect(self.export_failed_or_cancelled)
 
         self.btn_cancel = QPushButton("⏹ Hủy tác vụ")
         self.btn_cancel.setStyleSheet("background-color: #c62828; color: white; font-weight: bold; padding: 6px 14px;")
@@ -324,6 +339,7 @@ class VideoProductionTab(QWidget):
 
         act_layout.addWidget(self.btn_export_selected)
         act_layout.addWidget(self.btn_export_all)
+        act_layout.addWidget(self.btn_retry_failed)
         act_layout.addWidget(self.btn_cancel)
         act_layout.addWidget(self.btn_open_out_folder)
         act_layout.addStretch()
@@ -332,7 +348,7 @@ class VideoProductionTab(QWidget):
         self.lbl_time_info.setStyleSheet("color: #444; font-weight: bold;")
         act_layout.addWidget(self.lbl_time_info)
 
-        bot_layout.addLayout(act_layout, 1, 0, 1, 5)
+        bot_layout.addLayout(act_layout, 2, 0, 1, 5)
 
         # Thanh tiến độ kép: Tập hiện tại & Toàn bộ hàng đợi
         prog_layout = QVBoxLayout()
@@ -351,7 +367,7 @@ class VideoProductionTab(QWidget):
         p2_box.addWidget(self.prog_queue)
         prog_layout.addLayout(p2_box)
 
-        bot_layout.addLayout(prog_layout, 2, 0, 1, 5)
+        bot_layout.addLayout(prog_layout, 3, 0, 1, 5)
         main_layout.addWidget(bot_group)
 
         # Timer cập nhật thời gian chạy
@@ -382,28 +398,56 @@ class VideoProductionTab(QWidget):
             self._import_audio_paths(cand)
 
     def _import_audio_paths(self, filepaths: List[str]):
-        existing_paths = {it.audio_path for it in self.items}
-        added_count = 0
-        skipped_dup = 0
+        if not filepaths:
+            return
 
-        for path in filepaths:
-            norm_path = os.path.abspath(path)
-            if norm_path in existing_paths:
-                skipped_dup += 1
-                continue
+        if self.meta_worker and self.meta_worker.isRunning():
+            QMessageBox.information(
+                self, "Đang xử lý", "Tiến trình nạp tệp âm thanh trước đó đang chạy. Vui lòng đợi hoàn tất."
+            )
+            return
 
-            # Đo thời lượng qua ffprobe
-            dur = 0.0
-            try:
-                probe = probe_media(norm_path, self.config.ffprobe_path)
-                dur = probe["duration"]
-            except Exception:
-                pass
+        existing_paths = {os.path.abspath(it.audio_path) for it in self.items}
 
+        self.btn_add_files.setEnabled(False)
+        self.btn_add_folder.setEnabled(False)
+
+        self.meta_worker = AudioMetadataWorker(
+            filepaths=filepaths,
+            existing_paths=existing_paths,
+            ffprobe_path=self.config.ffprobe_path,
+        )
+        self.meta_worker.progress.connect(self._on_meta_progress)
+        self.meta_worker.item_probed.connect(self._on_meta_item_probed)
+        self.meta_worker.all_finished.connect(self._on_meta_all_finished)
+
+        self.import_progress_dialog = QProgressDialog(
+            "Đang kiểm tra tệp âm thanh...", "Hủy", 0, len(filepaths), self
+        )
+        self.import_progress_dialog.setWindowTitle("Nạp tệp âm thanh vào danh sách")
+        self.import_progress_dialog.setWindowModality(Qt.WindowModal)
+        self.import_progress_dialog.setMinimumDuration(200)
+        self.import_progress_dialog.canceled.connect(self._cancel_metadata_import)
+
+        self.meta_worker.start()
+
+    def _on_meta_progress(self, current: int, total: int, filename: str):
+        if self.import_progress_dialog:
+            self.import_progress_dialog.setValue(current)
+            self.import_progress_dialog.setLabelText(f"Đang kiểm tra [{current}/{total}]: {filename}")
+
+    def _on_meta_item_probed(self, data: dict):
+        status = data.get("status")
+        norm_path = data.get("path", "")
+        fname = data.get("filename", "")
+
+        if status == "valid":
+            # Đảm bảo không trùng với mục đã có trong self.items
+            if any(os.path.abspath(it.audio_path) == norm_path for it in self.items):
+                return
+            dur = data.get("duration", 0.0)
             item = AudioVideoItem(audio_path=norm_path, duration=dur)
-
-            # Gợi ý thông tin từ tên file
-            meta = parse_filename_metadata(item.filename)
+            meta = data.get("metadata", {})
             if "volume_num" in meta:
                 item.volume_num = meta["volume_num"]
             if "start_chapter" in meta and "end_chapter" in meta:
@@ -413,20 +457,74 @@ class VideoProductionTab(QWidget):
                 item.story_title = meta["story_title"]
             if "author" in meta:
                 item.author = meta["author"]
-
             self.items.append(item)
-            existing_paths.add(norm_path)
-            added_count += 1
+            self.refresh_table()
 
+        elif status == "error":
+            err_msg = data.get("error", "Tệp âm thanh không hợp lệ")
+            self.log("ERROR", f"Bỏ qua tệp hỏng '{fname}': {err_msg}")
+
+        elif status == "duplicate":
+            self.log("INFO", f"Bỏ qua tệp trùng lặp: {fname}")
+
+    def _on_meta_all_finished(self, added_count: int, skipped_dup: int, error_count: int):
+        if self.import_progress_dialog:
+            self.import_progress_dialog.close()
+            self.import_progress_dialog = None
+
+        self.btn_add_files.setEnabled(True)
+        self.btn_add_folder.setEnabled(True)
         self.refresh_table()
-        if skipped_dup > 0:
-            self.log("INFO", f"Đã thêm {added_count} audio. Bỏ qua {skipped_dup} tệp trùng lặp.")
-        else:
-            self.log("INFO", f"Đã thêm {added_count} audio vào danh sách.")
 
         if self.items:
             self.table_audio.selectRow(len(self.items) - 1)
             self.update_preview()
+
+        msg = f"Đã nạp xong danh sách: {added_count} tệp hợp lệ."
+        if skipped_dup > 0:
+            msg += f" Bỏ qua {skipped_dup} tệp trùng lặp."
+        if error_count > 0:
+            msg += f" Bỏ qua {error_count} tệp lỗi/hỏng."
+        self.log("INFO" if error_count == 0 else "WARNING", msg)
+
+        if error_count > 0:
+            QMessageBox.warning(
+                self,
+                "Tệp không hợp lệ",
+                f"Đã bỏ qua {error_count} tệp âm thanh không hợp lệ (không đọc được, thiếu luồng audio hoặc thời lượng bằng 0).\nXem nhật ký để biết chi tiết."
+            )
+
+    def _cancel_metadata_import(self):
+        if self.meta_worker and self.meta_worker.isRunning():
+            self.meta_worker.cancel()
+            self.log("WARNING", "Đã yêu cầu hủy nạp tệp âm thanh.")
+
+    def add_direct_items(self, items_data: List[dict]) -> int:
+        """Thêm trực tiếp các mục MP3 với metadata chính xác từ thẻ Sản Xuất Audio."""
+        added_count = 0
+        for data in items_data:
+            path = data.get("audio_path")
+            if not path or not os.path.isfile(path):
+                continue
+            norm_path = os.path.abspath(path)
+            if any(os.path.abspath(it.audio_path) == norm_path for it in self.items):
+                continue
+            item = AudioVideoItem(
+                audio_path=norm_path,
+                duration=data.get("duration", 0.0),
+                story_title=data.get("story_title", ""),
+                author=data.get("author", ""),
+                volume_num=data.get("volume_num", 1),
+                start_chapter=data.get("start_chapter", 1),
+                end_chapter=data.get("end_chapter", 1),
+            )
+            self.items.append(item)
+            added_count += 1
+        self.refresh_table()
+        if self.items:
+            self.table_audio.selectRow(len(self.items) - 1)
+            self.update_preview()
+        return added_count
 
     def remove_selected_items(self):
         selected_rows = sorted({idx.row() for idx in self.table_audio.selectedIndexes()}, reverse=True)
@@ -465,6 +563,7 @@ class VideoProductionTab(QWidget):
                 "waiting": "Chờ xử lý",
                 "processing": "Đang kết xuất...",
                 "completed": "Hoàn tất",
+                "skipped": "Đã bỏ qua",
                 "error": "Lỗi",
                 "cancelled": "Đã hủy",
             }
@@ -472,6 +571,7 @@ class VideoProductionTab(QWidget):
                 "waiting": "#555",
                 "processing": "#1565c0",
                 "completed": "#2e7d32",
+                "skipped": "#00838f",
                 "error": "#c62828",
                 "cancelled": "#e65100",
             }
@@ -589,6 +689,9 @@ class VideoProductionTab(QWidget):
         else:
             QMessageBox.warning(self, "Thư mục không tồn tại", f"Thư mục '{folder}' chưa được tạo.")
 
+    def on_overwrite_mode_changed(self):
+        self.config.overwrite_mode = self.combo_overwrite.currentData()
+
     def export_selected(self):
         rows = sorted({idx.row() for idx in self.table_audio.selectedIndexes()})
         if not rows:
@@ -603,6 +706,15 @@ class VideoProductionTab(QWidget):
             return
         self._start_export(self.items)
 
+    def export_failed_or_cancelled(self):
+        retry_items = [it for it in self.items if it.status in ("error", "cancelled")]
+        if not retry_items:
+            QMessageBox.information(
+                self, "Không có mục cần chạy lại", "Không tìm thấy mục nào có trạng thái lỗi hoặc đã hủy."
+            )
+            return
+        self._start_export(retry_items)
+
     def _start_export(self, items_to_export: List[AudioVideoItem]):
         ok, f_ver, _ = check_ffmpeg_installed(self.config.ffmpeg_path, self.config.ffprobe_path)
         if not ok:
@@ -610,17 +722,32 @@ class VideoProductionTab(QWidget):
             return
 
         self.config.output_dir = self.txt_out_dir.text().strip() or "output_videos"
+        self.config.overwrite_mode = self.combo_overwrite.currentData()
         os.makedirs(self.config.output_dir, exist_ok=True)
 
-        # Đặt lại trạng thái các mục sẽ chạy
+        # Lọc và kiểm tra các mục hợp lệ
+        valid_items: List[AudioVideoItem] = []
         for it in items_to_export:
-            it.status = "waiting"
-            it.progress = 0.0
-            it.error_message = ""
+            if not os.path.isfile(it.audio_path) or it.duration <= 0:
+                it.status = "error"
+                it.error_message = "Tệp audio không tồn tại hoặc thời lượng không hợp lệ."
+            else:
+                it.status = "waiting"
+                it.progress = 0.0
+                it.error_message = ""
+                valid_items.append(it)
+
         self.refresh_table()
+
+        if not valid_items:
+            QMessageBox.warning(
+                self, "Không có mục hợp lệ", "Tất cả các mục được chọn đều không hợp lệ hoặc thiếu tệp audio."
+            )
+            return
 
         self.btn_export_selected.setEnabled(False)
         self.btn_export_all.setEnabled(False)
+        self.btn_retry_failed.setEnabled(False)
         self.btn_cancel.setEnabled(True)
         self.prog_item.setValue(0)
         self.prog_queue.setValue(0)
@@ -628,12 +755,14 @@ class VideoProductionTab(QWidget):
         self.start_epoch = time.time()
         self.elapsed_timer.start(1000)
 
-        self.worker = VideoExportWorker(items_to_export, self.config)
+        self.worker = VideoExportWorker(valid_items, self.config)
         self.worker.item_started.connect(self.on_worker_item_started)
         self.worker.item_progress.connect(self.on_worker_item_progress)
         self.worker.queue_progress.connect(self.on_worker_queue_progress)
         self.worker.item_finished.connect(self.on_worker_item_finished)
+        self.worker.item_skipped.connect(self.on_worker_item_skipped)
         self.worker.item_failed.connect(self.on_worker_item_failed)
+        self.worker.item_cancelled.connect(self.on_worker_item_cancelled)
         self.worker.log_message.connect(self.log)
         self.worker.all_finished.connect(self.on_worker_all_finished)
         self.worker.start()
@@ -682,6 +811,23 @@ class VideoProductionTab(QWidget):
                 break
         self.refresh_table()
 
+    def on_worker_item_skipped(self, item_id: str, reason: str):
+        for it in self.items:
+            if it.id == item_id:
+                it.status = "skipped"
+                it.error_message = reason
+                it.progress = 100.0
+                break
+        self.refresh_table()
+
+    def on_worker_item_cancelled(self, item_id: str):
+        for it in self.items:
+            if it.id == item_id:
+                it.status = "cancelled"
+                it.error_message = "Đã bị hủy bởi người dùng."
+                break
+        self.refresh_table()
+
     def on_worker_item_failed(self, item_id: str, err: str):
         for it in self.items:
             if it.id == item_id:
@@ -690,11 +836,81 @@ class VideoProductionTab(QWidget):
                 break
         self.refresh_table()
 
-    def on_worker_all_finished(self, success_cnt: int, err_cnt: int):
+    def on_worker_all_finished(self, summary: Any):
         self.elapsed_timer.stop()
         self.btn_export_selected.setEnabled(True)
         self.btn_export_all.setEnabled(True)
+        self.btn_retry_failed.setEnabled(True)
         self.btn_cancel.setEnabled(False)
-        self.prog_item.setValue(100 if err_cnt == 0 else 0)
-        self.prog_queue.setValue(100 if err_cnt == 0 else 0)
+
+        if isinstance(summary, dict):
+            status = summary.get("status", "hoàn tất")
+            succ = summary.get("success", 0)
+            skip = summary.get("skipped", 0)
+            err = summary.get("error", 0)
+            canc = summary.get("cancelled", 0)
+        elif isinstance(summary, (tuple, list)):
+            succ = summary[0]
+            err = summary[1] if len(summary) > 1 else 0
+            skip = 0
+            canc = 0
+            status = "hoàn tất có lỗi" if err > 0 else "hoàn tất"
+        else:
+            status = getattr(summary, "status", "hoàn tất")
+            succ = getattr(summary, "success_count", 0)
+            skip = getattr(summary, "skipped_count", 0)
+            err = getattr(summary, "error_count", 0)
+            canc = getattr(summary, "cancelled_count", 0)
+
+        # Cập nhật thanh tiến độ theo trạng thái thực tế
+        if status == "đã hủy":
+            # Sau khi hủy, tiến độ giữ đúng phần đã xử lý; không ép thành 100%
+            self.prog_item.setValue(0)
+        elif status == "hoàn tất có lỗi":
+            self.prog_queue.setValue(100)
+            self.prog_item.setValue(0)
+        else:
+            self.prog_queue.setValue(100)
+            self.prog_item.setValue(100)
+
         self.refresh_table()
+
+        summary_msg = (
+            f"Tổng kết xuất video [{status.upper()}]: "
+            f"{succ} thành công, {skip} bỏ qua, {err} lỗi, {canc} đã hủy."
+        )
+        if status == "đã hủy":
+            self.log("WARNING", summary_msg)
+        elif status == "hoàn tất có lỗi":
+            self.log("ERROR", summary_msg)
+        else:
+            self.log("SUCCESS", summary_msg)
+
+    def is_busy(self) -> bool:
+        """Kiểm tra có bất kỳ worker nào đang chạy trong tab không."""
+        return (self.worker is not None and self.worker.isRunning()) or (
+            self.meta_worker is not None and self.meta_worker.isRunning()
+        )
+
+    def stop_all_workers(self):
+        """Yêu cầu hủy dừng an toàn mọi worker."""
+        if self.worker and self.worker.isRunning():
+            self.worker.cancel()
+        if self.meta_worker and self.meta_worker.isRunning():
+            self.meta_worker.cancel()
+
+    def wait_all_workers(self, timeout_ms: int = 5000) -> bool:
+        """Chờ tất cả worker dừng mà không làm đơ giao diện."""
+        start = time.time()
+        while (time.time() - start) * 1000 < timeout_ms:
+            busy = False
+            if self.worker and self.worker.isRunning():
+                busy = True
+                self.worker.wait(50)
+            if self.meta_worker and self.meta_worker.isRunning():
+                busy = True
+                self.meta_worker.wait(50)
+            if not busy:
+                return True
+            QCoreApplication.processEvents()
+        return not self.is_busy()

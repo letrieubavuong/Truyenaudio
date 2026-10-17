@@ -13,16 +13,19 @@ import os
 from typing import Optional
 from PySide6.QtCore import Qt, QRectF, QPointF
 from PySide6.QtGui import (
-    QGuiApplication, QImage, QPainter, QColor, QFont, QPen,
+    QImage, QPainter, QColor, QFont, QPen,
     QBrush, QLinearGradient, QFontMetrics, QPainterPath
 )
+from PySide6.QtWidgets import QApplication
 from core.video_models import AudioVideoItem, VideoConfig
 
 
 def ensure_qapp():
-    """Đảm bảo luôn có QGuiApplication để sử dụng QPainter và QFont."""
-    if not QGuiApplication.instance():
-        app = QGuiApplication(sys.argv if sys.argv else ["Truyenaudio"])
+    """Đảm bảo luôn có QApplication để sử dụng QPainter, QFont và QWidget."""
+    app = QApplication.instance()
+    if not app:
+        app = QApplication(sys.argv if sys.argv else ["Truyenaudio"])
+    return app
 
 
 def render_frame(item: AudioVideoItem, config: VideoConfig) -> QImage:

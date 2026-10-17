@@ -64,7 +64,7 @@ class StorageManager:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_chap_num ON chapters(story_id, chapter_num)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_chap_hash ON chapters(content_hash)")
 
-            # Migration: Kiểm tra cột version trong chapters nếu database cũ đã có
+            # Migration: Kiểm tra cột version và source trong chapters nếu database cũ đã có
             cursor.execute("PRAGMA table_info(chapters)")
             columns = [row["name"] for row in cursor.fetchall()]
             if "version" not in columns:
@@ -72,6 +72,15 @@ class StorageManager:
                     cursor.execute("ALTER TABLE chapters ADD COLUMN version INTEGER DEFAULT 1")
                 except Exception:
                     pass
+            if "source" not in columns:
+                try:
+                    cursor.execute("ALTER TABLE chapters ADD COLUMN source TEXT DEFAULT ''")
+                    cursor.execute("UPDATE chapters SET source = 'webnovel' WHERE (source IS NULL OR source = '') AND source_url LIKE '%webnovel.vn%'")
+                    cursor.execute("UPDATE chapters SET source = 'tamhoan' WHERE (source IS NULL OR source = '') AND source_url LIKE '%tamhoan.com%'")
+                    cursor.execute("UPDATE chapters SET source = 'vivutruyen' WHERE (source IS NULL OR source = '') AND source_url LIKE '%vivutruyen.com%'")
+                except Exception:
+                    pass
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_chap_source_num ON chapters(story_id, source, chapter_num)")
 
             # 3. Bảng lưu trữ các phiên bản nội dung khi cùng URL có nội dung mới (Bất biến)
             cursor.execute("""
@@ -255,12 +264,30 @@ class StorageManager:
             if not chapter.story_id:
                 chapter.story_id = self.get_default_story_id()
 
-            # 1. Kiểm tra xem có chương nào khác có cùng chapter_num nhưng khác source_url không
+            # Tự động nhận diện source nếu chapter chưa có
+            if not getattr(chapter, "source", ""):
+                if chapter.source_url:
+                    from core.profiles import detect_source_from_url
+                    chapter.source = detect_source_from_url(chapter.source_url) or ""
+                if not getattr(chapter, "source", "") and chapter.story_id:
+                    cursor.execute("SELECT url FROM stories WHERE id = ?", (chapter.story_id,))
+                    st_row = cursor.fetchone()
+                    if st_row and st_row["url"]:
+                        from core.profiles import detect_source_from_url
+                        chapter.source = detect_source_from_url(st_row["url"]) or ""
+
+            # 1. Kiểm tra xem có chương nào khác có cùng chapter_num trong CÙNG source không
             if chapter.chapter_num is not None:
-                cursor.execute(
-                    "SELECT id, source_url, chapter_title FROM chapters WHERE story_id = ? AND chapter_num = ? AND source_url != ?",
-                    (chapter.story_id, chapter.chapter_num, chapter.source_url or ""),
-                )
+                if chapter.source:
+                    cursor.execute(
+                        "SELECT id, source_url, chapter_title FROM chapters WHERE story_id = ? AND source = ? AND chapter_num = ? AND source_url != ?",
+                        (chapter.story_id, chapter.source, chapter.chapter_num, chapter.source_url or ""),
+                    )
+                else:
+                    cursor.execute(
+                        "SELECT id, source_url, chapter_title FROM chapters WHERE story_id = ? AND chapter_num = ? AND source_url != ?",
+                        (chapter.story_id, chapter.chapter_num, chapter.source_url or ""),
+                    )
                 diff_source = cursor.fetchone()
                 if diff_source:
                     warn = f"Cảnh báo: Chương {chapter.chapter_num} đã tồn tại từ URL khác: {diff_source['source_url']}."
@@ -323,7 +350,8 @@ class StorageManager:
                             status = ?,
                             prev_url = COALESCE(?, prev_url),
                             next_url = COALESCE(?, next_url),
-                            warnings = ?
+                            warnings = ?,
+                            source = CASE WHEN ? != '' THEN ? ELSE source END
                         WHERE id = ?
                     """, (
                         chapter.chapter_num,
@@ -333,6 +361,8 @@ class StorageManager:
                         chapter.prev_url,
                         chapter.next_url,
                         warnings_json,
+                        chapter.source or "",
+                        chapter.source or "",
                         chap_id,
                     ))
                 else:
@@ -344,7 +374,8 @@ class StorageManager:
                             status = ?,
                             prev_url = COALESCE(?, prev_url),
                             next_url = COALESCE(?, next_url),
-                            warnings = ?
+                            warnings = ?,
+                            source = CASE WHEN ? != '' THEN ? ELSE source END
                         WHERE id = ?
                     """, (
                         chapter.chapter_num,
@@ -353,6 +384,8 @@ class StorageManager:
                         chapter.prev_url,
                         chapter.next_url,
                         warnings_json,
+                        chapter.source or "",
+                        chapter.source or "",
                         chap_id,
                     ))
 
@@ -365,8 +398,8 @@ class StorageManager:
                     INSERT INTO chapters (
                         story_id, chapter_num, chapter_title, source_url,
                         raw_content, content_hash, version, fetch_time, status,
-                        prev_url, next_url, warnings
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        prev_url, next_url, warnings, source
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     chapter.story_id,
                     chapter.chapter_num,
@@ -380,6 +413,7 @@ class StorageManager:
                     chapter.prev_url,
                     chapter.next_url,
                     warnings_json,
+                    chapter.source or "",
                 ))
                 conn.commit()
                 chap_id = cursor.lastrowid
@@ -387,15 +421,29 @@ class StorageManager:
                 chapter.version = 1
                 return chap_id
 
-    def get_chapter_by_num(self, story_id: Optional[int], chapter_num: int) -> Optional[Chapter]:
+    def get_chapter_by_num(self, story_id: Optional[int], chapter_num: int, source: str = "") -> Optional[Chapter]:
         s_id = story_id if story_id is not None else self.get_default_story_id()
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(
-                "SELECT * FROM chapters WHERE story_id = ? AND chapter_num = ?",
-                (s_id, chapter_num),
-            )
-            row = cursor.fetchone()
+            row = None
+            if source:
+                cursor.execute(
+                    "SELECT * FROM chapters WHERE story_id = ? AND source = ? AND chapter_num = ?",
+                    (s_id, source, chapter_num),
+                )
+                row = cursor.fetchone()
+                if not row:
+                    cursor.execute(
+                        "SELECT * FROM chapters WHERE story_id = ? AND (source = '' OR source IS NULL) AND chapter_num = ?",
+                        (s_id, chapter_num),
+                    )
+                    row = cursor.fetchone()
+            else:
+                cursor.execute(
+                    "SELECT * FROM chapters WHERE story_id = ? AND chapter_num = ?",
+                    (s_id, chapter_num),
+                )
+                row = cursor.fetchone()
             if not row:
                 return None
             return self._row_to_chapter(row)
@@ -410,42 +458,81 @@ class StorageManager:
             return self._row_to_chapter(row)
 
     def get_chapters_range(
-        self, story_id: Optional[int], start_chap: int, end_chap: int
+        self, story_id: Optional[int], start_chap: int, end_chap: int, source: str = ""
     ) -> List[Chapter]:
         s_id = story_id if story_id is not None else self.get_default_story_id()
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
-                SELECT * FROM chapters
-                WHERE story_id = ? AND chapter_num >= ? AND chapter_num <= ?
-                ORDER BY chapter_num ASC
-            """, (s_id, start_chap, end_chap))
-            rows = cursor.fetchall()
+            rows = []
+            if source:
+                cursor.execute("""
+                    SELECT * FROM chapters
+                    WHERE story_id = ? AND source = ? AND chapter_num >= ? AND chapter_num <= ?
+                    ORDER BY chapter_num ASC
+                """, (s_id, source, start_chap, end_chap))
+                rows = cursor.fetchall()
+                if not rows:
+                    cursor.execute("""
+                        SELECT * FROM chapters
+                        WHERE story_id = ? AND (source = '' OR source IS NULL) AND chapter_num >= ? AND chapter_num <= ?
+                        ORDER BY chapter_num ASC
+                    """, (s_id, start_chap, end_chap))
+                    rows = cursor.fetchall()
+            else:
+                cursor.execute("""
+                    SELECT * FROM chapters
+                    WHERE story_id = ? AND chapter_num >= ? AND chapter_num <= ?
+                    ORDER BY chapter_num ASC
+                """, (s_id, start_chap, end_chap))
+                rows = cursor.fetchall()
             return [self._row_to_chapter(r) for r in rows]
 
-    def get_all_chapters(self, story_id: Optional[int] = None) -> List[Chapter]:
+    def get_all_chapters(self, story_id: Optional[int] = None, source: str = "") -> List[Chapter]:
         s_id = story_id if story_id is not None else self.get_default_story_id()
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
-                SELECT * FROM chapters
-                WHERE story_id = ?
-                ORDER BY chapter_num ASC
-            """, (s_id,))
-            rows = cursor.fetchall()
+            rows = []
+            if source:
+                cursor.execute("""
+                    SELECT * FROM chapters
+                    WHERE story_id = ? AND source = ?
+                    ORDER BY chapter_num ASC
+                """, (s_id, source))
+                rows = cursor.fetchall()
+                if not rows:
+                    cursor.execute("""
+                        SELECT * FROM chapters
+                        WHERE story_id = ? AND (source = '' OR source IS NULL)
+                        ORDER BY chapter_num ASC
+                    """, (s_id,))
+                    rows = cursor.fetchall()
+            else:
+                cursor.execute("""
+                    SELECT * FROM chapters
+                    WHERE story_id = ?
+                    ORDER BY chapter_num ASC
+                """, (s_id,))
+                rows = cursor.fetchall()
             return [self._row_to_chapter(r) for r in rows]
 
     def detect_gaps_in_range(
-        self, story_id: Optional[int], start_chap: int, end_chap: int
+        self, story_id: Optional[int], start_chap: int, end_chap: int, source: str = ""
     ) -> List[int]:
         s_id = story_id if story_id is not None else self.get_default_story_id()
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
-                SELECT chapter_num FROM chapters
-                WHERE story_id = ? AND chapter_num >= ? AND chapter_num <= ?
-                  AND status IN ('downloaded', 'verified')
-            """, (s_id, start_chap, end_chap))
+            if source:
+                cursor.execute("""
+                    SELECT chapter_num FROM chapters
+                    WHERE story_id = ? AND source = ? AND chapter_num >= ? AND chapter_num <= ?
+                      AND status IN ('downloaded', 'verified')
+                """, (s_id, source, start_chap, end_chap))
+            else:
+                cursor.execute("""
+                    SELECT chapter_num FROM chapters
+                    WHERE story_id = ? AND chapter_num >= ? AND chapter_num <= ?
+                      AND status IN ('downloaded', 'verified')
+                """, (s_id, start_chap, end_chap))
             existing = {r["chapter_num"] for r in cursor.fetchall() if r["chapter_num"] is not None}
             missing = [num for num in range(start_chap, end_chap + 1) if num not in existing]
             return missing
@@ -568,6 +655,10 @@ class StorageManager:
         if "version" in row.keys() and row["version"] is not None:
             ver = row["version"]
 
+        src = ""
+        if "source" in row.keys() and row["source"] is not None:
+            src = row["source"]
+
         return Chapter(
             id=row["id"],
             story_id=row["story_id"],
@@ -582,4 +673,5 @@ class StorageManager:
             prev_url=row["prev_url"] or "",
             next_url=row["next_url"] or "",
             warnings=warnings,
+            source=src,
         )

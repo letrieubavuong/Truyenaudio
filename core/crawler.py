@@ -18,6 +18,7 @@ from urllib.parse import urlparse
 from core.models import Chapter, StoryInfo
 from core.parser import SourceParser
 from core.storage import StorageManager
+from core.profiles import detect_source_from_url
 
 
 class NetworkCrawler:
@@ -83,9 +84,20 @@ class NetworkCrawler:
                 return None, "Tác vụ đã bị người dùng hủy.", None, diag_info
 
             try:
+                # Dọn dẹp các cookie theo dõi tích lũy (như page_viewed_* của Laravel trên tamhoan.com)
+                # Ngăn Cookie header phình to vượt quá bộ đệm máy chủ (Nginx large_client_header_buffers) gây lỗi HTTP 400
+                stale_cookie_names = [c.name for c in self.session.cookies if c.name.startswith("page_viewed_")]
+                for cname in stale_cookie_names:
+                    self.session.cookies.pop(cname, None)
+
                 response = self.session.get(url, timeout=self.timeout_seconds, allow_redirects=True)
                 status_code = response.status_code
                 final_url = response.url
+
+                # Dọn dẹp tiếp các cookie rác vừa được máy chủ Set-Cookie trong phản hồi
+                stale_cookie_names = [c.name for c in self.session.cookies if c.name.startswith("page_viewed_")]
+                for cname in stale_cookie_names:
+                    self.session.cookies.pop(cname, None)
 
                 diag_info["final_url"] = final_url
                 diag_info["status_code"] = status_code
@@ -121,6 +133,13 @@ class NetworkCrawler:
                         status_code,
                         diag_info,
                     )
+
+                if status_code == 400:
+                    # HTTP 400 thường do header/cookie quá lớn hoặc lỗi session, dọn sạch cookie và thử lại
+                    if attempt < self.max_retries:
+                        self.session.cookies.clear()
+                        time.sleep(1.0 * attempt)
+                        continue
 
                 if status_code != 200:
                     if attempt < self.max_retries:
@@ -202,12 +221,30 @@ class NetworkCrawler:
             if on_log:
                 on_log(level, msg)
 
-        log("INFO", f"Bắt đầu tác vụ thu thập: Chương {start_chap_num} đến Chương {end_chap_num}")
+        # Chuẩn hóa story_url của TamHoan nếu thiếu /truyen/
+        if "tamhoan.com" in (story_url or "").lower() and "/truyen/" not in (story_url or "").lower():
+            story_url = re.sub(r"tamhoan\.com/([a-z0-9\-]+)", r"tamhoan.com/truyen/\1", story_url)
+
+        source = detect_source_from_url(start_chapter_url or story_url)
+        log("INFO", f"Bắt đầu tác vụ thu thập: Chương {start_chap_num} đến Chương {end_chap_num} (Nguồn: {source or 'tự động'})")
         story = self.storage.get_or_create_story(url=story_url)
 
         visited_urls: Set[str] = set()
         seen_content_hashes: Set[str] = set()
+        consecutive_duplicate_count = 0
+        MAX_CONSECUTIVE_DUPLICATES = 50
         current_url = SourceParser._resolve_url(start_chapter_url, base_url=story_url)
+
+        # Nếu chưa có URL chương bắt đầu hoặc truyền nhầm URL truyện, tra cứu từ mục lục
+        if not current_url or current_url.rstrip("/") == story_url.rstrip("/"):
+            log("INFO", f"Đang tra cứu URL chương bắt đầu từ mục lục: {story_url}")
+            toc_html, _, _, _ = self.fetch_url(story_url)
+            if toc_html:
+                toc_data = SourceParser.parse_toc_html(toc_html, current_url=story_url, base_url=story_url)
+                if toc_data.get("chapters"):
+                    current_url = toc_data["chapters"][0]["url"]
+                    log("SUCCESS", f"Đã tìm thấy URL chương bắt đầu từ mục lục: {current_url}")
+
         current_num = start_chap_num
         total_to_fetch = end_chap_num - start_chap_num + 1
         cached_count = 0
@@ -218,8 +255,8 @@ class NetworkCrawler:
 
         # Nếu start_chap_num > 1 và URL bắt đầu truyền vào là chương 1 (hoặc mặc định),
         # kiểm tra xem CSDL đã có URL trực tiếp của start_chap_num không để tối ưu điểm xuất phát
-        if start_chap_num > 1 and current_url and ("chuong-1-" in current_url or "c-1" in current_url):
-            target_chap = self.storage.get_chapter_by_num(story.id, start_chap_num)
+        if start_chap_num > 1 and current_url and ("chuong-1-" in current_url or "c-1" in current_url or "203612" in current_url):
+            target_chap = self.storage.get_chapter_by_num(story.id, start_chap_num, source=source)
             if target_chap and target_chap.source_url and target_chap.source_url.startswith("http"):
                 current_url = target_chap.source_url
                 log("INFO", f"Tự động điều chỉnh URL bắt đầu tới Chương {start_chap_num} từ CSDL: {current_url}")
@@ -258,7 +295,7 @@ class NetworkCrawler:
                 m_num = re.search(r"(?:chuong|c)[-_](\d+)", current_url, re.IGNORECASE)
                 cand_chap_num = int(m_num.group(1)) if m_num else current_num
                 if cand_chap_num:
-                    cand_chap = self.storage.get_chapter_by_num(story.id, cand_chap_num)
+                    cand_chap = self.storage.get_chapter_by_num(story.id, cand_chap_num, source=source)
                     if cand_chap:
                         is_offline = not cand_chap.source_url or not cand_chap.source_url.startswith("http")
                         same_slug = bool(m_num and cand_chap.source_url and f"chuong-{cand_chap_num}" in cand_chap.source_url.lower())
@@ -336,11 +373,17 @@ class NetworkCrawler:
                     log("INFO", f"[BỎ QUA] Chương {chap_display_num} đã có trong CSDL (Khôi phục tiến độ). Bỏ qua không tải lại.")
                     cached_count += 1
                     current_num = max(current_num, chap_display_num + 1)
+                    last_processed_chap_num = max(last_processed_chap_num or 0, chap_display_num)
+                    if existing_chap.content_hash:
+                        seen_content_hashes.add(existing_chap.content_hash)
                     if on_progress:
                         on_progress(cached_count + downloaded_count, total_to_fetch, f"Đã có: Chương {chap_display_num}")
                 else:
                     log("INFO", f"[TUA NHANH] Chương {chap_display_num} đã có trong CSDL (Đang tìm tới Chương {start_chap_num}).")
                     current_num = max(start_chap_num, chap_display_num + 1)
+                    last_processed_chap_num = max(last_processed_chap_num or 0, chap_display_num)
+                    if existing_chap.content_hash:
+                        seen_content_hashes.add(existing_chap.content_hash)
                     if on_progress:
                         on_progress(cached_count + downloaded_count, total_to_fetch, f"Đang tua tới Chương {start_chap_num}...")
 
@@ -381,6 +424,7 @@ class NetworkCrawler:
                     raw_content="",
                     status="failed",
                     warnings=[err],
+                    source=source,
                 )
                 self.storage.save_chapter(failed_chap)
                 break
@@ -418,16 +462,41 @@ class NetworkCrawler:
                     raw_content="",
                     status="failed",
                     warnings=[stop_reason],
+                    source=source,
                 )
                 self.storage.save_chapter(failed_chap)
                 break
 
-            # Phát hiện nội dung trùng lặp bất thường (chuyển hướng ngầm hoặc trang lỗi)
-            if content_hash in seen_content_hashes:
-                stop_reason = f"Phát hiện nội dung trùng lặp bất thường với chương đã tải trước đó (SHA256: {content_hash[:8]}...). Trang có thể bị lặp hoặc chuyển hướng ngầm."
+            # Phát hiện nội dung trùng lặp bất thường hoặc lặp lại số chương cũ đã tải
+            is_hash_duplicate = content_hash in seen_content_hashes
+            is_num_duplicate = (last_processed_chap_num is not None and chap_num <= last_processed_chap_num)
+
+            if is_hash_duplicate or is_num_duplicate:
+                consecutive_duplicate_count += 1
+                dup_desc = f"SHA256: {content_hash[:8]}..." if is_hash_duplicate else f"Chương {chap_num} <= Chương {last_processed_chap_num}"
+
+                # Nếu trang có cung cấp liên kết kế tiếp và chưa vượt quá ngưỡng lặp tối đa:
+                # Bỏ qua chương trùng lặp này và đi tiếp qua next_url (ví dụ website đăng lặp lại một nhóm chương cũ)
+                if next_url and consecutive_duplicate_count <= MAX_CONSECUTIVE_DUPLICATES:
+                    log("WARNING", (
+                        f"[BỎ QUA TRÙNG LẶP] Trang '{current_url}' bị lặp lại ({dup_desc}). "
+                        f"Tự động bỏ qua ({consecutive_duplicate_count}/{MAX_CONSECUTIVE_DUPLICATES}) và đi tiếp tới: {next_url}"
+                    ))
+                    current_url = next_url
+                    time.sleep(self.delay_seconds)
+                    continue
+
+                # Nếu lặp quá nhiều lần hoặc không có liên kết kế tiếp -> Dừng lại an toàn
+                stop_reason = (
+                    f"Phát hiện nội dung trùng lặp bất thường ({dup_desc}) "
+                    f"với {consecutive_duplicate_count} trang lặp liên tiếp. Trang có thể bị lặp vô hạn hoặc chuyển hướng ngầm."
+                )
                 status_category = "incomplete"
                 log("ERROR", f"[DỪNG] {stop_reason}")
                 break
+
+            # Khi gặp chương mới hợp lệ, đặt lại bộ đếm lặp liên tiếp
+            consecutive_duplicate_count = 0
             seen_content_hashes.add(content_hash)
 
             # Ghi log chẩn đoán nội dung trích xuất và nguồn liên kết
@@ -449,6 +518,7 @@ class NetworkCrawler:
                 prev_url=parsed["prev_url"],
                 next_url=next_url,
                 warnings=parsed["warnings"],
+                source=source,
             )
 
             self.storage.save_chapter(chapter)

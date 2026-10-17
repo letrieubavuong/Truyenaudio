@@ -86,6 +86,7 @@ class Chapter:
     prev_url: str = ""
     next_url: str = ""
     warnings: List[str] = field(default_factory=list)
+    source: str = ""
 
     @property
     def paragraphs(self) -> List[str]:

@@ -3,7 +3,7 @@ QWidget {
     background-color: #f8f9fa;
     color: #212529;
     font-family: "Segoe UI", Arial, sans-serif;
-    font-size: 13px;
+    font-size: 10pt;
 }
 
 QMainWindow {

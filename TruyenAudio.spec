@@ -7,6 +7,7 @@ block_cipher = None
 # Đường dẫn tài nguyên cần đóng gói kèm theo ứng dụng
 datas = [
     ('resources', 'resources'),
+    ('core/tts_runner.py', 'core'),
 ]
 
 # Các module lớn không sử dụng cần loại trừ để giảm dung lượng file exe
@@ -22,8 +23,6 @@ excludes = [
     'PySide6.Qt3DRender',
     'PySide6.QtCharts',
     'PySide6.QtSpatialAudio',
-    'PySide6.QtMultimedia',
-    'PySide6.QtMultimediaWidgets',
     'tkinter',
     'unittest',
 ]
@@ -44,6 +43,12 @@ hiddenimports = [
     'core.video_renderer',
     'core.ffmpeg_utils',
     'core.utils',
+    'core.tts_models',
+    'core.tts_chunker',
+    'core.tts_manifest',
+    'core.tts_adapter',
+    'core.tts_assembler',
+    'core.tts_dictionary',
     'gui',
     'gui.main_window',
     'gui.widgets',
@@ -51,6 +56,8 @@ hiddenimports = [
     'gui.workers',
     'gui.video_tab',
     'gui.video_worker',
+    'gui.tts_tab',
+    'gui.tts_worker',
     'bs4',
     'lxml',
     'requests',
